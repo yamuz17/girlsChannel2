@@ -36,7 +36,10 @@ from urllib.parse import urljoin
 from zoneinfo import ZoneInfo
 
 from PIL import Image
-from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
+from playwright.async_api import (
+    async_playwright,
+    TimeoutError as PlaywrightTimeoutError,
+)
 
 import env_loader
 from config import CFG
@@ -85,7 +88,9 @@ TABLE_NAME = CFG.TABLE_NAME or "items"
 
 BASE_OUTPUT_ROOT = CFG.BASE_OUTPUT_ROOT
 if not BASE_OUTPUT_ROOT:
-    raise RuntimeError("BASE_OUTPUT_ROOT が未設定です（girlsChannel.env を確認してください）")
+    raise RuntimeError(
+        "BASE_OUTPUT_ROOT が未設定です（girlsChannel.env を確認してください）"
+    )
 
 # --- 共通：SQLite運用（03などと揃える） ---
 BUSY_TIMEOUT_MS = CFG.BUSY_TIMEOUT_MS
@@ -111,7 +116,9 @@ if END_02 < 0:
 # 基本は共通の PICK_ORDER を使う（必要なら PICK_ORDER_02 で上書き）
 PICK_ORDER_02 = (env_loader.env_str("PICK_ORDER_02", "") or "").strip()
 if not PICK_ORDER_02:
-    PICK_ORDER_02 = (env_loader.env_str("PICK_ORDER", "post_date_desc") or "post_date_desc").strip()
+    PICK_ORDER_02 = (
+        env_loader.env_str("PICK_ORDER", "post_date_desc") or "post_date_desc"
+    ).strip()
 
 # --- 02固有：取得系 ---
 MAX_COMMENTS_TO_FETCH = env_loader.env_int("MAX_COMMENTS_TO_FETCH", 75)
@@ -120,12 +127,15 @@ MAX_CONSECUTIVE_MISSES = env_loader.env_int("MAX_CONSECUTIVE_MISSES", 20)
 HEADLESS_MODE = env_loader.env_bool("HEADLESS_MODE", True)
 WAIT_TIMEOUT = env_loader.env_int("WAIT_TIMEOUT_MS", 45000)  # ms
 REQUEST_INTERVAL_MS = env_loader.env_int("REQUEST_INTERVAL_MS", 300)
-USER_AGENT = env_loader.env_str(
-    "USER_AGENT",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/123.0.0.0 Safari/537.36"
-) or ""
+USER_AGENT = (
+    env_loader.env_str(
+        "USER_AGENT",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/123.0.0.0 Safari/537.36",
+    )
+    or ""
+)
 
 SAVE_DEBUG_ON_PARSE_FAIL = env_loader.env_bool("SAVE_DEBUG_ON_PARSE_FAIL", True)
 ENABLE_RELATED_KEYWORDS = env_loader.env_bool("ENABLE_RELATED_KEYWORDS", True)
@@ -134,18 +144,36 @@ ENABLE_RELATED_KEYWORDS = env_loader.env_bool("ENABLE_RELATED_KEYWORDS", True)
 FOLDER_TITLE_MAX_CHARS = env_loader.env_int("FOLDER_TITLE_MAX_CHARS", 10)
 
 # 投稿しない判定（運用でON/OFFしたくなるので env化）
-ENABLE_DEPLOY_SKIP_IF_SHORTAGE = env_loader.env_bool("ENABLE_DEPLOY_SKIP_IF_SHORTAGE", True)
+ENABLE_DEPLOY_SKIP_IF_SHORTAGE = env_loader.env_bool(
+    "ENABLE_DEPLOY_SKIP_IF_SHORTAGE", True
+)
 REQUIRE_TOTAL_N = env_loader.env_int("REQUIRE_TOTAL_N", 10)
 REQUIRE_RATIO_N = env_loader.env_int("REQUIRE_RATIO_N", 10)
 
 # NGワード
 ENABLE_EXCLUDE_BADWORDS = env_loader.env_bool("ENABLE_EXCLUDE_BADWORDS", True)
 BADWORDS_DEFAULT = [
-    "殺", "死", "亡",
-    "自殺", "他殺", "事故死",
-    "ころす", "殺す", "死ね", "氏ね",
-    "しぬ", "ﾀﾋ", "タヒ", "レイプ", "ﾚｲﾌﾟ", "売春", "朝鮮",
-    "ガルちゃん", "ｶﾞﾙちゃん","ガル民", "ｶﾞﾙ民",
+    "殺",
+    "死",
+    "亡",
+    "自殺",
+    "他殺",
+    "事故死",
+    "ころす",
+    "殺す",
+    "死ね",
+    "氏ね",
+    "しぬ",
+    "ﾀﾋ",
+    "タヒ",
+    "レイプ",
+    "ﾚｲﾌﾟ",
+    "売春",
+    "朝鮮",
+    "ガルちゃん",
+    "ｶﾞﾙちゃん",
+    "ガル民",
+    "ｶﾞﾙ民",
 ]
 BADWORDS = env_list_csv("BADWORDS_CSV", BADWORDS_DEFAULT)
 BADWORDS_NORMALIZE = env_loader.env_bool("BADWORDS_NORMALIZE", True)
@@ -168,7 +196,19 @@ VIEWPORT_SIZE = {"width": 1280, "height": 1024}
 # 仕様①：主語なし AND 10文字以内を除外（固定）
 ENABLE_EXCLUDE_SHORT_SUBJECTLESS = True
 SHORT_SUBJECTLESS_MAX_LEN = 10
-JP_PARTICLES = ("は", "が", "を", "に", "で", "と", "へ", "から", "まで", "より", "って")
+JP_PARTICLES = (
+    "は",
+    "が",
+    "を",
+    "に",
+    "で",
+    "と",
+    "へ",
+    "から",
+    "まで",
+    "より",
+    "って",
+)
 INTERJECTION_ONLY_RE = re.compile(r"^[ぁ-んァ-ンー〜～…!！?？、。,\s]+$")
 
 # 仕様③④：候補だけ要約→まだ長ければ除外
@@ -188,21 +228,21 @@ RELATED_KEYWORDS_CSS = "ul.keywords li a"
 TITLE_BRACKET_RE = re.compile(r"【[^】]*】")
 EMOJI_RE = re.compile(
     "["
-    "\U0001F1E6-\U0001F1FF"
-    "\U0001F300-\U0001F5FF"
-    "\U0001F600-\U0001F64F"
-    "\U0001F680-\U0001F6FF"
-    "\U0001F700-\U0001F77F"
-    "\U0001F780-\U0001F7FF"
-    "\U0001F800-\U0001F8FF"
-    "\U0001F900-\U0001F9FF"
-    "\U0001FA00-\U0001FA6F"
-    "\U0001FA70-\U0001FAFF"
-    "\u2600-\u27BF"
-    "\uFE0F"
-    "\u200D"
+    "\U0001f1e6-\U0001f1ff"
+    "\U0001f300-\U0001f5ff"
+    "\U0001f600-\U0001f64f"
+    "\U0001f680-\U0001f6ff"
+    "\U0001f700-\U0001f77f"
+    "\U0001f780-\U0001f7ff"
+    "\U0001f800-\U0001f8ff"
+    "\U0001f900-\U0001f9ff"
+    "\U0001fa00-\U0001fa6f"
+    "\U0001fa70-\U0001faff"
+    "\u2600-\u27bf"
+    "\ufe0f"
+    "\u200d"
     "]",
-    flags=re.UNICODE
+    flags=re.UNICODE,
 )
 
 
@@ -226,7 +266,10 @@ def connect_db(db_path: Path) -> sqlite3.Connection:
 
 
 def ensure_columns(con: sqlite3.Connection) -> None:
-    cols_lower = {str(r[1]).lower() for r in con.execute(f"PRAGMA table_info({TABLE_NAME})").fetchall()}
+    cols_lower = {
+        str(r[1]).lower()
+        for r in con.execute(f"PRAGMA table_info({TABLE_NAME})").fetchall()
+    }
 
     need = {
         "check_create": "INTEGER NOT NULL DEFAULT 0",
@@ -256,12 +299,14 @@ def pick_one_stage_id(con: sqlite3.Connection, stage: int) -> Optional[str]:
 
     row = con.execute(
         f"SELECT id FROM {TABLE_NAME} WHERE check_create=? ORDER BY {order_sql} LIMIT 1",
-        (int(stage),)
+        (int(stage),),
     ).fetchone()
     return str(row["id"]) if row else None
 
 
-def update_stage_success(con: sqlite3.Connection, tid: str, folder_name: str, keywords_raw: str) -> None:
+def update_stage_success(
+    con: sqlite3.Connection, tid: str, folder_name: str, keywords_raw: str
+) -> None:
     for attempt in range(1, LOCK_RETRY_MAX + 1):
         try:
             con.execute("BEGIN IMMEDIATE;")
@@ -275,11 +320,20 @@ def update_stage_success(con: sqlite3.Connection, tid: str, folder_name: str, ke
                        updated_at=?
                  WHERE id=? AND check_create=?
                 """,
-                (int(END_02), folder_name, (keywords_raw or "").strip(), now_jst(), tid, int(STA_02))
+                (
+                    int(END_02),
+                    folder_name,
+                    (keywords_raw or "").strip(),
+                    now_jst(),
+                    tid,
+                    int(STA_02),
+                ),
             )
             con.execute("COMMIT;")
             if cur.rowcount == 0:
-                raise RuntimeError(f"update_success rowcount=0: id={tid} check_createがSTA_02({STA_02})ではない可能性")
+                raise RuntimeError(
+                    f"update_success rowcount=0: id={tid} check_createがSTA_02({STA_02})ではない可能性"
+                )
             return
         except sqlite3.OperationalError as e:
             try:
@@ -291,7 +345,9 @@ def update_stage_success(con: sqlite3.Connection, tid: str, folder_name: str, ke
                 time.sleep(LOCK_RETRY_SLEEP_SEC)
                 continue
             raise
-    raise sqlite3.OperationalError("database is locked (retry exceeded) on update_success")
+    raise sqlite3.OperationalError(
+        "database is locked (retry exceeded) on update_success"
+    )
 
 
 def update_stage_error(con: sqlite3.Connection, tid: str, err: str) -> None:
@@ -305,7 +361,7 @@ def update_stage_error(con: sqlite3.Connection, tid: str, err: str) -> None:
                        updated_at=?
                  WHERE id=?
                 """,
-                (err[:2000], now_jst(), tid)
+                (err[:2000], now_jst(), tid),
             )
             con.execute("COMMIT;")
             return
@@ -319,7 +375,9 @@ def update_stage_error(con: sqlite3.Connection, tid: str, err: str) -> None:
                 time.sleep(LOCK_RETRY_SLEEP_SEC)
                 continue
             raise
-    raise sqlite3.OperationalError("database is locked (retry exceeded) on update_error")
+    raise sqlite3.OperationalError(
+        "database is locked (retry exceeded) on update_error"
+    )
 
 
 def increment_check_deploy(con: sqlite3.Connection, tid: str, reason: str) -> None:
@@ -334,7 +392,7 @@ def increment_check_deploy(con: sqlite3.Connection, tid: str, reason: str) -> No
                        updated_at   = ?
                  WHERE id=?
                 """,
-                (f"deploy_skip: {reason}"[:2000], now_jst(), tid)
+                (f"deploy_skip: {reason}"[:2000], now_jst(), tid),
             )
             con.execute("COMMIT;")
             return
@@ -344,11 +402,15 @@ def increment_check_deploy(con: sqlite3.Connection, tid: str, reason: str) -> No
             except Exception:
                 pass
             if "locked" in str(e).lower():
-                print(f"[LOCK] retry {attempt}/{LOCK_RETRY_MAX} on increment_check_deploy")
+                print(
+                    f"[LOCK] retry {attempt}/{LOCK_RETRY_MAX} on increment_check_deploy"
+                )
                 time.sleep(LOCK_RETRY_SLEEP_SEC)
                 continue
             raise
-    raise sqlite3.OperationalError("database is locked (retry exceeded) on increment_check_deploy")
+    raise sqlite3.OperationalError(
+        "database is locked (retry exceeded) on increment_check_deploy"
+    )
 
 
 # ===================== 文字処理 =====================
@@ -497,7 +559,7 @@ def meta_keywords_to_json_array_string(meta_content: str) -> str:
 
 
 def normalize_for_badword_check(s: str) -> str:
-    t = (s or "")
+    t = s or ""
     t = t.replace("\r\n", "\n").replace("\r", "\n")
     t = re.sub(r"\s+", "", t)
     return t.lower()
@@ -550,7 +612,7 @@ async def extract_keywords_raw_from_meta(page) -> str:
 
     try:
         content = await page.evaluate(
-            "() => document.querySelector('meta[name=\"keywords\"],meta[name=\"Keywords\"],meta[name=\"keyword\"],meta[name=\"Keyword\"]')?.getAttribute('content') || ''"
+            '() => document.querySelector(\'meta[name="keywords"],meta[name="Keywords"],meta[name="keyword"],meta[name="Keyword"]\')?.getAttribute(\'content\') || \'\''
         )
         if isinstance(content, str) and content.strip():
             return meta_keywords_to_json_array_string(content.strip())
@@ -560,7 +622,9 @@ async def extract_keywords_raw_from_meta(page) -> str:
     return ""
 
 
-async def scrape(url: str) -> Tuple[str, str, str, Path, Path, Optional[Path], str, List[str], List[Dict]]:
+async def scrape(
+    url: str,
+) -> Tuple[str, str, str, Path, Path, Optional[Path], str, List[str], List[Dict]]:
     print(f"[INFO] TARGET_URL: {url}")
 
     topic_id = extract_topic_id(url)
@@ -622,9 +686,14 @@ async def scrape(url: str) -> Tuple[str, str, str, Path, Path, Optional[Path], s
             except Exception:
                 keywords_raw_json = ""
 
-            (text_dir / "keywords_raw.txt").write_text(keywords_raw_json or "", encoding="utf-8")
+            (text_dir / "keywords_raw.txt").write_text(
+                keywords_raw_json or "", encoding="utf-8"
+            )
             if keywords_raw_json:
-                print(f"   -> keywords_raw(meta/json): {keywords_raw_json[:200]}" + ("..." if len(keywords_raw_json) > 200 else ""))
+                print(
+                    f"   -> keywords_raw(meta/json): {keywords_raw_json[:200]}"
+                    + ("..." if len(keywords_raw_json) > 200 else "")
+                )
             else:
                 print("   -> keywords_raw(meta): 取得なし")
 
@@ -641,7 +710,10 @@ async def scrape(url: str) -> Tuple[str, str, str, Path, Path, Optional[Path], s
                         f.write(k + "\n")
 
                 if related_keywords:
-                    print(f"   -> 関連キーワード: {', '.join(related_keywords[:10])}" + (" ..." if len(related_keywords) > 10 else ""))
+                    print(
+                        f"   -> 関連キーワード: {', '.join(related_keywords[:10])}"
+                        + (" ..." if len(related_keywords) > 10 else "")
+                    )
                 else:
                     print("   -> 関連キーワード: 取得なし")
 
@@ -672,12 +744,20 @@ async def scrape(url: str) -> Tuple[str, str, str, Path, Path, Optional[Path], s
 
             print("3. コメントページを順番に取得...")
             consecutive_misses = 0
-            plus_line_re = re.compile(r"^[\+＋]\s*([0-9０-９,]+(?:\.[0-9０-９]+)?(?:万|千)?)\s*$", re.M)
-            minus_line_re = re.compile(r"^[\-−]\s*([0-9０-９,]+(?:\.[0-9０-９]+)?(?:万|千)?)\s*$", re.M)
+            plus_line_re = re.compile(
+                r"^[\+＋]\s*([0-9０-９,]+(?:\.[0-9０-９]+)?(?:万|千)?)\s*$", re.M
+            )
+            minus_line_re = re.compile(
+                r"^[\-−]\s*([0-9０-９,]+(?:\.[0-9０-９]+)?(?:万|千)?)\s*$", re.M
+            )
 
             for n in range(1, MAX_COMMENTS_TO_FETCH + 1):
                 comment_url = f"https://girlschannel.net/comment/{topic_id}/{n}/"
-                print(f"\rコメント取得中: {n} / {MAX_COMMENTS_TO_FETCH}", end="", flush=True)
+                print(
+                    f"\rコメント取得中: {n} / {MAX_COMMENTS_TO_FETCH}",
+                    end="",
+                    flush=True,
+                )
 
                 resp = await page.goto(comment_url, wait_until="domcontentloaded")
                 status = resp.status if resp is not None else None
@@ -702,27 +782,31 @@ async def scrape(url: str) -> Tuple[str, str, str, Path, Path, Optional[Path], s
                 if not id_line:
                     consecutive_misses += 1
                     if SAVE_DEBUG_ON_PARSE_FAIL:
-                        (text_dir / "debug" / f"parse_fail_{n}.txt").write_text(body_text, encoding="utf-8")
+                        (text_dir / "debug" / f"parse_fail_{n}.txt").write_text(
+                            body_text, encoding="utf-8"
+                        )
                     await page.wait_for_timeout(REQUEST_INTERVAL_MS)
                     continue
 
-                tail = body_text[id_line.end():]
+                tail = body_text[id_line.end() :]
 
                 plus_m = plus_line_re.search(tail)
                 if not plus_m:
                     consecutive_misses += 1
                     if SAVE_DEBUG_ON_PARSE_FAIL:
-                        (text_dir / "debug" / f"parse_fail_{n}.txt").write_text(body_text, encoding="utf-8")
+                        (text_dir / "debug" / f"parse_fail_{n}.txt").write_text(
+                            body_text, encoding="utf-8"
+                        )
                     await page.wait_for_timeout(REQUEST_INTERVAL_MS)
                     continue
 
-                after_plus = tail[plus_m.end():]
+                after_plus = tail[plus_m.end() :]
                 minus_m = minus_line_re.search(after_plus)
 
                 plus_text = plus_m.group(1)
                 minus_text = minus_m.group(1) if minus_m else "0"
 
-                comment_body_raw = tail[:plus_m.start()].strip()
+                comment_body_raw = tail[: plus_m.start()].strip()
                 comment_body_raw = remove_quote_anchors(comment_body_raw)
                 comment_body_raw = remove_emojis(comment_body_raw).strip()
 
@@ -755,14 +839,26 @@ async def scrape(url: str) -> Tuple[str, str, str, Path, Path, Optional[Path], s
             print("\rコメント取得完了。                        ")
             print(f"[INFO] comments_fetched: {len(comments)}")
 
-            return thread_title, run_stamp, folder_name, text_dir, image_dir, main_img_path, keywords_raw_json, related_keywords, comments
+            return (
+                thread_title,
+                run_stamp,
+                folder_name,
+                text_dir,
+                image_dir,
+                main_img_path,
+                keywords_raw_json,
+                related_keywords,
+                comments,
+            )
 
         finally:
             await browser.close()
 
 
 # ===================== ランキング作成（A案） =====================
-def build_ranked_selection(ranked_all: List[Dict], want_n: int, extra_candidates: int) -> List[Dict]:
+def build_ranked_selection(
+    ranked_all: List[Dict], want_n: int, extra_candidates: int
+) -> List[Dict]:
     result: List[Dict] = []
     n_all = len(ranked_all)
     if n_all == 0:
@@ -801,15 +897,21 @@ def build_ranked_selection(ranked_all: List[Dict], want_n: int, extra_candidates
     return result
 
 
-def write_txt_ranking(path: Path, title: str, header: str, rows: List[Dict], include_ratio: bool = False) -> None:
+def write_txt_ranking(
+    path: Path, title: str, header: str, rows: List[Dict], include_ratio: bool = False
+) -> None:
     with path.open("w", encoding="utf-8") as f:
         f.write(f"【スレッドタイトル】: {title}\n\n--- {header} ---\n\n")
         for i, c in enumerate(rows):
             if include_ratio:
                 ratio_percent = c["ratio"] * 100
-                f.write(f"【順位: {i+1}】 (高評価率: {ratio_percent:.1f}%, +{c['plus']}/-{c['minus']})\n")
+                f.write(
+                    f"【順位: {i + 1}】 (高評価率: {ratio_percent:.1f}%, +{c['plus']}/-{c['minus']})\n"
+                )
             else:
-                f.write(f"【順位: {i+1}】 (合計: {c['total']}, +{c['plus']}/-{c['minus']})\n")
+                f.write(
+                    f"【順位: {i + 1}】 (合計: {c['total']}, +{c['plus']}/-{c['minus']})\n"
+                )
             f.write(f"{c['id']}: {c['body']}\n\n")
 
 
@@ -860,29 +962,61 @@ def analyze_and_save(
     created_stamp: str,
     comments: List[Dict],
     text_dir: Path,
-    tags: Optional[List[str]] = None
+    tags: Optional[List[str]] = None,
 ) -> Tuple[int, int]:
     text_dir.mkdir(parents=True, exist_ok=True)
 
     ranked_total_all = sorted(comments, key=lambda x: x["total"], reverse=True)
-    ranking_total = build_ranked_selection(ranked_total_all, TOP_N_TOTAL, RANKING_EXTRA_CANDIDATES)
+    ranking_total = build_ranked_selection(
+        ranked_total_all, TOP_N_TOTAL, RANKING_EXTRA_CANDIDATES
+    )
 
     txt_total = text_dir / "ranking_total.txt"
     ndjson_total = text_dir / "ranking_total.ndjson"
-    write_txt_ranking(txt_total, title, "総合評価数ランキング", ranking_total, include_ratio=False)
-    write_ndjson_ranking(ndjson_total, title, created_stamp, JSON_ORDER, ranking_total, points_key="total", tags=tags)
+    write_txt_ranking(
+        txt_total, title, "総合評価数ランキング", ranking_total, include_ratio=False
+    )
+    write_ndjson_ranking(
+        ndjson_total,
+        title,
+        created_stamp,
+        JSON_ORDER,
+        ranking_total,
+        points_key="total",
+        tags=tags,
+    )
 
     print(f"[SAVE] {txt_total} ({len(ranking_total)}件)")
     print(f"[SAVE] {ndjson_total}")
 
-    filtered_ratio = [c for c in comments if c["ratio"] >= RATIO_THRESHOLD and c["total"] > MIN_TOTAL_VOTES]
+    filtered_ratio = [
+        c
+        for c in comments
+        if c["ratio"] >= RATIO_THRESHOLD and c["total"] > MIN_TOTAL_VOTES
+    ]
     ranked_ratio_all = sorted(filtered_ratio, key=lambda x: x["plus"], reverse=True)
-    ranking_ratio = build_ranked_selection(ranked_ratio_all, TOP_N_RATIO, RANKING_EXTRA_CANDIDATES)
+    ranking_ratio = build_ranked_selection(
+        ranked_ratio_all, TOP_N_RATIO, RANKING_EXTRA_CANDIDATES
+    )
 
     txt_ratio = text_dir / "ranking_ratio_80_plus.txt"
     ndjson_ratio = text_dir / "ranking_ratio_80_plus.ndjson"
-    write_txt_ranking(txt_ratio, title, f"高評価率 ({int(RATIO_THRESHOLD*100)}%以上) ランキング", ranking_ratio, include_ratio=True)
-    write_ndjson_ranking(ndjson_ratio, title, created_stamp, JSON_ORDER, ranking_ratio, points_key="plus", tags=tags)
+    write_txt_ranking(
+        txt_ratio,
+        title,
+        f"高評価率 ({int(RATIO_THRESHOLD * 100)}%以上) ランキング",
+        ranking_ratio,
+        include_ratio=True,
+    )
+    write_ndjson_ranking(
+        ndjson_ratio,
+        title,
+        created_stamp,
+        JSON_ORDER,
+        ranking_ratio,
+        points_key="plus",
+        tags=tags,
+    )
 
     print(f"[SAVE] {txt_ratio} ({len(ranking_ratio)}件)")
     print(f"[SAVE] {ndjson_ratio}")
@@ -897,9 +1031,13 @@ def main() -> None:
     print(f"[INFO] DB: {DB_PATH}")
     print(f"[INFO] table: {TABLE_NAME}")
     print(f"[INFO] stage: STA_02={STA_02} -> END_02={END_02}")
-    print(f"[INFO] sqlite: journal_mode={SQLITE_JOURNAL_MODE} synchronous={SQLITE_SYNCHRONOUS} busy_timeout_ms={BUSY_TIMEOUT_MS}")
+    print(
+        f"[INFO] sqlite: journal_mode={SQLITE_JOURNAL_MODE} synchronous={SQLITE_SYNCHRONOUS} busy_timeout_ms={BUSY_TIMEOUT_MS}"
+    )
     print(f"[INFO] output_root: {BASE_OUTPUT_ROOT}")
-    print(f"[INFO] headless={HEADLESS_MODE} max_comments={MAX_COMMENTS_TO_FETCH} pick_order_02={PICK_ORDER_02}")
+    print(
+        f"[INFO] headless={HEADLESS_MODE} max_comments={MAX_COMMENTS_TO_FETCH} pick_order_02={PICK_ORDER_02}"
+    )
 
     con = connect_db(DB_PATH)
     try:
@@ -914,14 +1052,24 @@ def main() -> None:
         print(f"[INFO] picked id={tid} -> TARGET_URL={target_url}")
 
         try:
-            title, run_stamp, folder_name, text_dir, image_dir, main_img, keywords_raw_json, related_tags, comments_data = asyncio.run(
-                scrape(target_url)
-            )
+            (
+                title,
+                run_stamp,
+                folder_name,
+                text_dir,
+                image_dir,
+                main_img,
+                keywords_raw_json,
+                related_tags,
+                comments_data,
+            ) = asyncio.run(scrape(target_url))
 
             if not comments_data:
                 raise RuntimeError("コメントが取得できませんでした（0件）")
 
-            total_n, ratio_n = analyze_and_save(title, run_stamp, comments_data, text_dir=text_dir, tags=related_tags)
+            total_n, ratio_n = analyze_and_save(
+                title, run_stamp, comments_data, text_dir=text_dir, tags=related_tags
+            )
 
             if ENABLE_DEPLOY_SKIP_IF_SHORTAGE:
                 shortage = []
@@ -941,9 +1089,13 @@ def main() -> None:
             print(f"  folder_name={folder_name}")
             print(f"  text_dir={text_dir}")
             print(f"  image_dir={image_dir}")
-            print(f"  keywords_raw(json)={keywords_raw_json[:200] + ('...' if len(keywords_raw_json) > 200 else '') if keywords_raw_json else '(なし)'}")
+            print(
+                f"  keywords_raw(json)={keywords_raw_json[:200] + ('...' if len(keywords_raw_json) > 200 else '') if keywords_raw_json else '(なし)'}"
+            )
             if ENABLE_RELATED_KEYWORDS:
-                print(f"  related_keywords={', '.join(related_tags) if related_tags else '(なし)'}")
+                print(
+                    f"  related_keywords={', '.join(related_tags) if related_tags else '(なし)'}"
+                )
             if main_img:
                 print(f"  main_img={main_img}")
             print(f"  ranking_counts: total={total_n} ratio={ratio_n}")

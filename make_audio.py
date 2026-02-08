@@ -8,13 +8,10 @@ import json
 import re
 import wave
 import sys
-import sqlite3
 import subprocess
 import time
 from pathlib import Path
-from typing import List, Tuple, Optional
-from datetime import datetime
-from zoneinfo import ZoneInfo
+from typing import List, Tuple
 
 import requests
 
@@ -30,13 +27,19 @@ queue_db.load_env()
 CFG = queue_db.build_queue_config_from_env()
 BASE_OUTPUT_ROOT = Path(queue_db._env_str("BASE_OUTPUT_ROOT", "")).expanduser()
 
-PICK_ORDER = queue_db._env_str("PICK_ORDER", "post_date_desc").strip() or "post_date_desc"
+PICK_ORDER = (
+    queue_db._env_str("PICK_ORDER", "post_date_desc").strip() or "post_date_desc"
+)
 STA_04 = queue_db._env_int("STA_04", 3)
 END_04 = queue_db._env_int("END_04", 4)
 
 ENGINE_URL = queue_db._env_str("ENGINE_URL", "http://127.0.0.1:50021").strip()
 
-VOICE_APP_CANDIDATES = [p.strip() for p in queue_db._env_str("VOICE_APP_CANDIDATES", "").split(";") if p.strip()] or [
+VOICE_APP_CANDIDATES = [
+    p.strip()
+    for p in queue_db._env_str("VOICE_APP_CANDIDATES", "").split(";")
+    if p.strip()
+] or [
     "/Applications/VOICEVOX.app",
     "/Applications/VOICEBOX.app",
 ]
@@ -103,7 +106,9 @@ def ensure_voice_engine_ready(engine_url: str) -> None:
         elapsed = time.time() - start
         remain = int(VOICE_BOOT_TIMEOUT_SEC - elapsed)
         if remain <= 0:
-            raise RuntimeError(f"VOICE engine not ready after {int(VOICE_BOOT_TIMEOUT_SEC)}s: {engine_url}")
+            raise RuntimeError(
+                f"VOICE engine not ready after {int(VOICE_BOOT_TIMEOUT_SEC)}s: {engine_url}"
+            )
 
         print(f"[INFO] wait for VOICE engine... ({remain}s left)")
         time.sleep(VOICE_POLL_INTERVAL_SEC)
@@ -114,16 +119,16 @@ def ensure_voice_engine_ready(engine_url: str) -> None:
 # =========================
 _EMOJI_RE = re.compile(
     "["
-    "\U0001F300-\U0001F5FF"
-    "\U0001F600-\U0001F64F"
-    "\U0001F680-\U0001F6FF"
-    "\U0001F700-\U0001F77F"
-    "\U0001F780-\U0001F7FF"
-    "\U0001F800-\U0001F8FF"
-    "\U0001F900-\U0001F9FF"
-    "\U0001FA00-\U0001FAFF"
-    "\U00002700-\U000027BF"
-    "\U00002600-\U000026FF"
+    "\U0001f300-\U0001f5ff"
+    "\U0001f600-\U0001f64f"
+    "\U0001f680-\U0001f6ff"
+    "\U0001f700-\U0001f77f"
+    "\U0001f780-\U0001f7ff"
+    "\U0001f800-\U0001f8ff"
+    "\U0001f900-\U0001f9ff"
+    "\U0001fa00-\U0001faff"
+    "\U00002700-\U000027bf"
+    "\U00002600-\U000026ff"
     "]+",
     flags=re.UNICODE,
 )
@@ -134,7 +139,9 @@ def clean_text(s: str) -> str:
     if REMOVE_EMOJI:
         s = _EMOJI_RE.sub("", s)
     if COMPRESS_LONG_BAR and COMPRESS_LONG_BAR > 0:
-        s = re.sub(r"ー{" + str(COMPRESS_LONG_BAR + 1) + r",}", "ー" * COMPRESS_LONG_BAR, s)
+        s = re.sub(
+            r"ー{" + str(COMPRESS_LONG_BAR + 1) + r",}", "ー" * COMPRESS_LONG_BAR, s
+        )
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
@@ -148,9 +155,13 @@ def iter_ndjson(path: Path):
 
 
 def find_ratio_ndjson(text_dir: Path) -> Path:
-    ratio_files = sorted([p for p in text_dir.glob("*.ndjson") if "ratio" in p.name.lower()])
+    ratio_files = sorted(
+        [p for p in text_dir.glob("*.ndjson") if "ratio" in p.name.lower()]
+    )
     if not ratio_files:
-        raise FileNotFoundError(f"ratio系NDJSONが見つかりません: {text_dir}/*.ndjson（ファイル名にratioが必要）")
+        raise FileNotFoundError(
+            f"ratio系NDJSONが見つかりません: {text_dir}/*.ndjson（ファイル名にratioが必要）"
+        )
     return ratio_files[0]
 
 
@@ -160,7 +171,9 @@ def fetch_speakers() -> list[dict]:
     return r.json()
 
 
-def find_style_id(speakers: list[dict], speaker_name: str, style_name: str = "ノーマル") -> int:
+def find_style_id(
+    speakers: list[dict], speaker_name: str, style_name: str = "ノーマル"
+) -> int:
     for sp in speakers:
         name = sp.get("name", "")
         if speaker_name in name:
@@ -180,14 +193,22 @@ def wav_duration_ms(wav_bytes: bytes) -> int:
     return int(frames * 1000 / rate)
 
 
-def synth_voicevox(text: str, style_id: int, *, speed_scale: float | None = None) -> bytes:
-    q = requests.post(f"{ENGINE_URL}/audio_query", params={"text": text, "speaker": style_id}, timeout=30)
+def synth_voicevox(
+    text: str, style_id: int, *, speed_scale: float | None = None
+) -> bytes:
+    q = requests.post(
+        f"{ENGINE_URL}/audio_query",
+        params={"text": text, "speaker": style_id},
+        timeout=30,
+    )
     q.raise_for_status()
     query = q.json()
     if speed_scale is not None:
         query["speedScale"] = float(speed_scale)
 
-    s = requests.post(f"{ENGINE_URL}/synthesis", params={"speaker": style_id}, json=query, timeout=120)
+    s = requests.post(
+        f"{ENGINE_URL}/synthesis", params={"speaker": style_id}, json=query, timeout=120
+    )
     s.raise_for_status()
     return s.content
 
@@ -253,7 +274,8 @@ def allocate_targets_ms_by_chars(
     raw = [int(round(available_ms * w / wsum)) for w in weights]
     targets = [min(max(x, min_ms), max_ms) for x in raw]
 
-    def total(x): return sum(x)
+    def total(x):
+        return sum(x)
 
     for _ in range(10):
         cur = total(targets)
@@ -305,7 +327,11 @@ def concat_wavs_with_silence(wav_paths: List[Path], out_wav: Path, silence_ms: i
 
         for i, wf in enumerate(wav_paths):
             with wave.open(str(wf), "rb") as wi:
-                if (wi.getnchannels(), wi.getsampwidth(), wi.getframerate()) != (nchannels, sampwidth, framerate):
+                if (wi.getnchannels(), wi.getsampwidth(), wi.getframerate()) != (
+                    nchannels,
+                    sampwidth,
+                    framerate,
+                ):
                     raise RuntimeError(f"WAV形式が揃っていません: {wf.name}")
                 wo.writeframes(wi.readframes(wi.getnframes()))
             if i != len(wav_paths) - 1 and silence_ms > 0:
@@ -344,7 +370,9 @@ def run_voice_job(parent_dir: Path) -> None:
     max_ms = int(MAX_SEC_PER_COMMENT * 1000)
 
     texts = [t for _, t in items]
-    targets_ms = allocate_targets_ms_by_chars(texts, total_ms, SILENCE_MS, min_ms, max_ms)
+    targets_ms = allocate_targets_ms_by_chars(
+        texts, total_ms, SILENCE_MS, min_ms, max_ms
+    )
 
     print("PARENT_DIR:", parent_dir)
     print("ndjson:", ndjson_path)
@@ -353,7 +381,9 @@ def run_voice_job(parent_dir: Path) -> None:
 
     per_paths_in_order: List[Path] = []
 
-    for order_idx, ((rank, text), target_ms) in enumerate(zip(items, targets_ms), start=1):
+    for order_idx, ((rank, text), target_ms) in enumerate(
+        zip(items, targets_ms), start=1
+    ):
         style_id = cycle_ids[(order_idx - 1) % len(cycle_ids)]
         wav_fixed = ensure_duration_by_speedscale(text, style_id, target_ms)
 
@@ -371,7 +401,9 @@ def run_voice_job(parent_dir: Path) -> None:
 def main() -> int:
     print(f"[INFO] {queue_db.now_jst()}")
     print(f"[INFO] DB: {CFG.db_path}")
-    print(f"[INFO] table={CFG.table} STA_04={STA_04} END_04={END_04} order={PICK_ORDER}")
+    print(
+        f"[INFO] table={CFG.table} STA_04={STA_04} END_04={END_04} order={PICK_ORDER}"
+    )
     print(f"[INFO] BASE_OUTPUT_ROOT: {BASE_OUTPUT_ROOT}")
 
     try:
@@ -403,7 +435,10 @@ def main() -> int:
             except Exception as e:
                 err = f"{type(e).__name__}: {e}"
                 queue_db.mark_fail(con, CFG.table, item_id, STA_04, err)
-                print(f"[ERROR] failed id={item_id} kept check_create={STA_04}. {err}", file=sys.stderr)
+                print(
+                    f"[ERROR] failed id={item_id} kept check_create={STA_04}. {err}",
+                    file=sys.stderr,
+                )
                 return 1
 
     except Exception as e:

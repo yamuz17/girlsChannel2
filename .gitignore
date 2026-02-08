@@ -19,6 +19,8 @@ venv/
 .mypy_cache/
 
 # outputs / media
+output/
+outputs/
 *.mp4
 *.mov
 *.mkv
@@ -34,6 +36,7 @@ venv/
 *.db
 *.sqlite
 *.sqlite3
+*.sqlite*
 
 # logs / temp
 *.log

@@ -130,7 +130,9 @@ def build_queue_config_from_env() -> QueueConfig:
     sync = (CFG.SQLITE_SYNCHRONOUS or "NORMAL").strip().upper() or "NORMAL"
 
     enable_idx = CFG.ENABLE_PICK_QUEUE_INDEX
-    idx_name = (CFG.PICK_QUEUE_INDEX_NAME or "idx_items_pick_queue").strip() or "idx_items_pick_queue"
+    idx_name = (
+        CFG.PICK_QUEUE_INDEX_NAME or "idx_items_pick_queue"
+    ).strip() or "idx_items_pick_queue"
 
     return QueueConfig(
         db_path=db_path,
@@ -209,7 +211,9 @@ def ensure_pick_queue_index(con: sqlite3.Connection, cfg: QueueConfig) -> None:
         pass
 
 
-def pick_one(con: sqlite3.Connection, table: str, sta: int, pick_order: str) -> Optional[Tuple[int, str]]:
+def pick_one(
+    con: sqlite3.Connection, table: str, sta: int, pick_order: str
+) -> Optional[Tuple[int, str]]:
     """
     check_create==sta を1件拾う。返り値: (id, folder_name)
     """
@@ -237,7 +241,9 @@ def pick_one(con: sqlite3.Connection, table: str, sta: int, pick_order: str) -> 
     return int(row["id"]), str(row["folder_name"])
 
 
-def mark_done(con: sqlite3.Connection, table: str, item_id: int, sta_expected: int, end_value: int) -> None:
+def mark_done(
+    con: sqlite3.Connection, table: str, item_id: int, sta_expected: int, end_value: int
+) -> None:
     """
     成功：STA→END（期待値付き）
     """
@@ -260,7 +266,9 @@ def mark_done(con: sqlite3.Connection, table: str, item_id: int, sta_expected: i
         )
 
 
-def mark_fail(con: sqlite3.Connection, table: str, item_id: int, sta_value: int, err: str) -> None:
+def mark_fail(
+    con: sqlite3.Connection, table: str, item_id: int, sta_value: int, err: str
+) -> None:
     """
     失敗：STA据え置き + last_error
     """

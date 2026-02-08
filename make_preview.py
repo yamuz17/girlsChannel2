@@ -35,7 +35,9 @@ else:
     else:
         raise SystemExit("[ENV] BASE_OUTPUT_ROOT is required (empty)")
 
-PICK_ORDER = (queue_db._env_str("PICK_ORDER", "post_date_desc") or "post_date_desc").strip()
+PICK_ORDER = (
+    queue_db._env_str("PICK_ORDER", "post_date_desc") or "post_date_desc"
+).strip()
 
 STA_05 = int(queue_db._env_int("STA_05", 4))
 END_05 = int(queue_db._env_int("END_05", 5))
@@ -61,7 +63,11 @@ BG_DARKEN = 0.12
 
 # タイトル（見た目）
 TITLE_STYLE_PRESET = int(queue_db._env_int("TITLE_STYLE_PRESET", 1))
-TITLE_ACCENT_WORDS = [w.strip() for w in (queue_db._env_str("TITLE_ACCENT_WORDS", "登録") or "").split(",") if w.strip()]
+TITLE_ACCENT_WORDS = [
+    w.strip()
+    for w in (queue_db._env_str("TITLE_ACCENT_WORDS", "登録") or "").split(",")
+    if w.strip()
+]
 
 TITLE_BOX_POS = "top"
 TITLE_BOX_H_RATIO = 0.25
@@ -93,7 +99,9 @@ INTRO_SEC = float((queue_db._env_str("INTRO_SEC", "0.9") or "0.9").strip())
 INTRO_FPS = int(queue_db._env_int("INTRO_FPS", 30))
 INTRO_AUDIO_SR = int(queue_db._env_int("INTRO_AUDIO_SR", 48000))
 INTRO_AUDIO_CH = int(queue_db._env_int("INTRO_AUDIO_CH", 2))
-INTRO_AUDIO_BITRATE = (queue_db._env_str("INTRO_AUDIO_BITRATE", "192k") or "192k").strip()
+INTRO_AUDIO_BITRATE = (
+    queue_db._env_str("INTRO_AUDIO_BITRATE", "192k") or "192k"
+).strip()
 
 
 def ensure_tools() -> None:
@@ -201,7 +209,11 @@ def load_title_text(parent_dir: Path) -> str:
                 if not line:
                     continue
                 obj = json.loads(line)
-                if isinstance(obj, dict) and "meta" in obj and isinstance(obj["meta"], dict):
+                if (
+                    isinstance(obj, dict)
+                    and "meta" in obj
+                    and isinstance(obj["meta"], dict)
+                ):
                     t = str(obj["meta"].get("title", "")).strip()
                     if t:
                         return t
@@ -228,8 +240,14 @@ def draw_text_with_accent(
     stroke_fill: tuple,
 ) -> None:
     if not accent_words:
-        draw.text((x, y), text, font=font, fill=base_fill,
-                  stroke_width=stroke_width, stroke_fill=stroke_fill)
+        draw.text(
+            (x, y),
+            text,
+            font=font,
+            fill=base_fill,
+            stroke_width=stroke_width,
+            stroke_fill=stroke_fill,
+        )
         return
 
     cur_x = x
@@ -249,25 +267,45 @@ def draw_text_with_accent(
                 next_word = w
 
         if next_pos is None:
-            draw.text((cur_x, y), remain, font=font, fill=base_fill,
-                      stroke_width=stroke_width, stroke_fill=stroke_fill)
+            draw.text(
+                (cur_x, y),
+                remain,
+                font=font,
+                fill=base_fill,
+                stroke_width=stroke_width,
+                stroke_fill=stroke_fill,
+            )
             break
 
         before = remain[:next_pos]
         if before:
-            draw.text((cur_x, y), before, font=font, fill=base_fill,
-                      stroke_width=stroke_width, stroke_fill=stroke_fill)
+            draw.text(
+                (cur_x, y),
+                before,
+                font=font,
+                fill=base_fill,
+                stroke_width=stroke_width,
+                stroke_fill=stroke_fill,
+            )
             cur_x += int(draw.textlength(before, font=font))
 
         word = next_word or ""
-        draw.text((cur_x, y), word, font=font, fill=accent_fill,
-                  stroke_width=stroke_width, stroke_fill=stroke_fill)
+        draw.text(
+            (cur_x, y),
+            word,
+            font=font,
+            fill=accent_fill,
+            stroke_width=stroke_width,
+            stroke_fill=stroke_fill,
+        )
         cur_x += int(draw.textlength(word, font=font))
 
-        remain = remain[next_pos + len(word):]
+        remain = remain[next_pos + len(word) :]
 
 
-def wrap_lines(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont, max_w: int) -> List[str]:
+def wrap_lines(
+    draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont, max_w: int
+) -> List[str]:
     raw_lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
     if not raw_lines:
         return [""]
@@ -315,32 +353,52 @@ def pick_latest_mp3(start_dir: Path, fixed_name: str) -> Path:
         if not p.exists():
             raise FileNotFoundError(f"mp3 not found: {p}")
         return p
-    mp3s = sorted(start_dir.glob("*.mp3"), key=lambda p: p.stat().st_mtime, reverse=True)
+    mp3s = sorted(
+        start_dir.glob("*.mp3"), key=lambda p: p.stat().st_mtime, reverse=True
+    )
     if not mp3s:
         raise FileNotFoundError(f"no mp3 found in: {start_dir}")
     return mp3s[0]
 
 
-def make_preview_mp4(preview_png: Path, mp3_path: Path, out_mp4: Path, ffmpeg_log: Path) -> None:
+def make_preview_mp4(
+    preview_png: Path, mp3_path: Path, out_mp4: Path, ffmpeg_log: Path
+) -> None:
     out_mp4.parent.mkdir(parents=True, exist_ok=True)
-    run_ffmpeg([
-        "ffmpeg", "-y",
-        "-loop", "1", "-i", str(preview_png),
-        "-i", str(mp3_path),
-        "-t", f"{INTRO_SEC}",
-        "-vf",
-        f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
-        f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=black",
-        "-r", str(INTRO_FPS),
-        "-c:v", "libx264",
-        "-pix_fmt", "yuv420p",
-        "-c:a", "aac",
-        "-b:a", INTRO_AUDIO_BITRATE,
-        "-ar", str(INTRO_AUDIO_SR),
-        "-ac", str(INTRO_AUDIO_CH),
-        "-shortest",
-        str(out_mp4),
-    ], log_path=ffmpeg_log)
+    run_ffmpeg(
+        [
+            "ffmpeg",
+            "-y",
+            "-loop",
+            "1",
+            "-i",
+            str(preview_png),
+            "-i",
+            str(mp3_path),
+            "-t",
+            f"{INTRO_SEC}",
+            "-vf",
+            f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
+            f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=black",
+            "-r",
+            str(INTRO_FPS),
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-b:a",
+            INTRO_AUDIO_BITRATE,
+            "-ar",
+            str(INTRO_AUDIO_SR),
+            "-ac",
+            str(INTRO_AUDIO_CH),
+            "-shortest",
+            str(out_mp4),
+        ],
+        log_path=ffmpeg_log,
+    )
 
 
 def build_preview_png(parent_dir: Path) -> Path:
@@ -387,7 +445,11 @@ def build_preview_png(parent_dir: Path) -> Path:
         font = ImageFont.truetype(str(font_path), font_size)
         lines = wrap_lines(draw, title_text, font, max_w=max_w)
         text_h = calc_total_text_height(font, len(lines))
-        if (not AUTO_SHRINK) or (font_size <= MIN_FONT_SIZE) or (text_h <= max_h and len(lines) <= 4):
+        if (
+            (not AUTO_SHRINK)
+            or (font_size <= MIN_FONT_SIZE)
+            or (text_h <= max_h and len(lines) <= 4)
+        ):
             break
         font_size -= 2
 
@@ -423,7 +485,9 @@ def build_preview_png(parent_dir: Path) -> Path:
 def main() -> int:
     print(f"[INFO] {queue_db.now_jst()}")
     print(f"[INFO] DB: {CFG.db_path}")
-    print(f"[INFO] table={CFG.table} STA_05={STA_05} END_05={END_05} order={PICK_ORDER}")
+    print(
+        f"[INFO] table={CFG.table} STA_05={STA_05} END_05={END_05} order={PICK_ORDER}"
+    )
     print(f"[INFO] BASE_OUTPUT_ROOT: {BASE_OUTPUT_ROOT}")
 
     ensure_tools()
@@ -461,7 +525,12 @@ def main() -> int:
             print(f"[INFO] mp3    = {mp3_path}")
             print(f"[INFO] outmp4 = {out_mp4}")
             print(f"[INFO] sec    = {INTRO_SEC}")
-            make_preview_mp4(preview_png=preview_png, mp3_path=mp3_path, out_mp4=out_mp4, ffmpeg_log=ffmpeg_log)
+            make_preview_mp4(
+                preview_png=preview_png,
+                mp3_path=mp3_path,
+                out_mp4=out_mp4,
+                ffmpeg_log=ffmpeg_log,
+            )
             print(f"[OK] preview.mp4 created: {out_mp4}")
             print(f"[INFO] ffmpeg log: {ffmpeg_log}")
 

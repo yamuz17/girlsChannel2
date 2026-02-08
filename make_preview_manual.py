@@ -18,7 +18,9 @@ from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageOps
 
 # ★対象フォルダ（DBの folder_name と同じ）
 FOLDER_NAME = "5979943_20260101-163615_漫画家・江口寿史氏、"  # ←ここを書き換え
-PLAN_ROOT = Path("/Users/yumahama/Library/CloudStorage/GoogleDrive-yuma17.service@gmail.com/マイドライブ/plan_001")
+PLAN_ROOT = Path(
+    "/Users/yumahama/Library/CloudStorage/GoogleDrive-yuma17.service@gmail.com/マイドライブ/plan_001"
+)
 
 # main画像（固定）
 MAIN_REL = "image/main/1.jpeg"
@@ -39,7 +41,7 @@ BG_DARKEN = 0.12  # 0.0=暗くしない, 0.10〜0.20で前景が立つ
 # =========================================================
 # タイトル文字 スタイル切替（1〜3）
 # =========================================================
-TITLE_STYLE_PRESET = 1   # ★ 1 / 2 / 3 を切り替えるだけ
+TITLE_STYLE_PRESET = 1  # ★ 1 / 2 / 3 を切り替えるだけ
 TITLE_ACCENT_WORDS = ["登録"]
 
 TITLE_BOX_POS = "top"
@@ -70,7 +72,9 @@ NDJSON_SEARCH_DIR_REL = "text"
 # =========================================================
 
 # ★start mp3 置き場
-START_DIR = Path("/Users/yumahama/Library/CloudStorage/GoogleDrive-yuma17.service@gmail.com/マイドライブ/plan_001/start")
+START_DIR = Path(
+    "/Users/yumahama/Library/CloudStorage/GoogleDrive-yuma17.service@gmail.com/マイドライブ/plan_001/start"
+)
 START_MP3_NAME = ""  # 空なら最新mp3、固定したいなら "xxx.mp3"
 
 # ★イントロ秒数（0.7秒）
@@ -93,9 +97,15 @@ def get_title_style(preset: int) -> dict:
     if preset == 1:
         return {"base_fill": (255, 255, 255, 255), "accent_fill": (255, 255, 255, 255)}
     if preset == 2:
-        return {"base_fill": (255, 255, 255, 255), "accent_fill": (255, 212, 0, 255)}  # #FFD400
+        return {
+            "base_fill": (255, 255, 255, 255),
+            "accent_fill": (255, 212, 0, 255),
+        }  # #FFD400
     if preset == 3:
-        return {"base_fill": (255, 255, 255, 255), "accent_fill": (0, 229, 255, 255)}  # #00E5FF
+        return {
+            "base_fill": (255, 255, 255, 255),
+            "accent_fill": (0, 229, 255, 255),
+        }  # #00E5FF
     return {"base_fill": (255, 255, 255, 255), "accent_fill": (255, 255, 255, 255)}
 
 
@@ -117,7 +127,9 @@ def resolve_jp_font_path() -> Path:
     for p in candidates:
         if p.exists():
             return p
-    raise FileNotFoundError("日本語フォントが見つかりません。resolve_jp_font_path() の候補に追加してください。")
+    raise FileNotFoundError(
+        "日本語フォントが見つかりません。resolve_jp_font_path() の候補に追加してください。"
+    )
 
 
 # =========================================================
@@ -198,7 +210,11 @@ def load_title_text(parent_dir: Path) -> str:
                 if not line:
                     continue
                 obj = json.loads(line)
-                if isinstance(obj, dict) and "meta" in obj and isinstance(obj["meta"], dict):
+                if (
+                    isinstance(obj, dict)
+                    and "meta" in obj
+                    and isinstance(obj["meta"], dict)
+                ):
                     t = str(obj["meta"].get("title", "")).strip()
                     if t:
                         return t
@@ -228,8 +244,14 @@ def draw_text_with_accent(
     stroke_fill: tuple,
 ) -> None:
     if not accent_words:
-        draw.text((x, y), text, font=font, fill=base_fill,
-                  stroke_width=stroke_width, stroke_fill=stroke_fill)
+        draw.text(
+            (x, y),
+            text,
+            font=font,
+            fill=base_fill,
+            stroke_width=stroke_width,
+            stroke_fill=stroke_fill,
+        )
         return
 
     cur_x = x
@@ -249,25 +271,45 @@ def draw_text_with_accent(
                 next_word = w
 
         if next_pos is None:
-            draw.text((cur_x, y), remain, font=font, fill=base_fill,
-                      stroke_width=stroke_width, stroke_fill=stroke_fill)
+            draw.text(
+                (cur_x, y),
+                remain,
+                font=font,
+                fill=base_fill,
+                stroke_width=stroke_width,
+                stroke_fill=stroke_fill,
+            )
             break
 
         before = remain[:next_pos]
         if before:
-            draw.text((cur_x, y), before, font=font, fill=base_fill,
-                      stroke_width=stroke_width, stroke_fill=stroke_fill)
+            draw.text(
+                (cur_x, y),
+                before,
+                font=font,
+                fill=base_fill,
+                stroke_width=stroke_width,
+                stroke_fill=stroke_fill,
+            )
             cur_x += int(draw.textlength(before, font=font))
 
         word = next_word
-        draw.text((cur_x, y), word, font=font, fill=accent_fill,
-                  stroke_width=stroke_width, stroke_fill=stroke_fill)
+        draw.text(
+            (cur_x, y),
+            word,
+            font=font,
+            fill=accent_fill,
+            stroke_width=stroke_width,
+            stroke_fill=stroke_fill,
+        )
         cur_x += int(draw.textlength(word, font=font))
 
-        remain = remain[next_pos + len(word):]
+        remain = remain[next_pos + len(word) :]
 
 
-def wrap_lines(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont, max_w: int) -> List[str]:
+def wrap_lines(
+    draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont, max_w: int
+) -> List[str]:
     raw_lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
     if not raw_lines:
         return [""]
@@ -312,7 +354,9 @@ def pick_latest_mp3(start_dir: Path, fixed_name: str) -> Path:
         if not p.exists():
             raise FileNotFoundError(f"mp3 not found: {p}")
         return p
-    mp3s = sorted(start_dir.glob("*.mp3"), key=lambda p: p.stat().st_mtime, reverse=True)
+    mp3s = sorted(
+        start_dir.glob("*.mp3"), key=lambda p: p.stat().st_mtime, reverse=True
+    )
     if not mp3s:
         raise FileNotFoundError(f"no mp3 found in: {start_dir}")
     return mp3s[0]
@@ -320,24 +364,39 @@ def pick_latest_mp3(start_dir: Path, fixed_name: str) -> Path:
 
 def make_preview_mp4(preview_png: Path, mp3_path: Path, out_mp4: Path) -> None:
     out_mp4.parent.mkdir(parents=True, exist_ok=True)
-    run([
-        "ffmpeg", "-y",
-        "-loop", "1", "-i", str(preview_png),
-        "-i", str(mp3_path),
-        "-t", f"{INTRO_SEC}",
-        "-vf",
-        f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
-        f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=black",
-        "-r", str(INTRO_FPS),
-        "-c:v", "libx264",
-        "-pix_fmt", "yuv420p",
-        "-c:a", "aac",
-        "-b:a", INTRO_AUDIO_BITRATE,
-        "-ar", str(INTRO_AUDIO_SR),
-        "-ac", str(INTRO_AUDIO_CH),
-        "-shortest",
-        str(out_mp4),
-    ])
+    run(
+        [
+            "ffmpeg",
+            "-y",
+            "-loop",
+            "1",
+            "-i",
+            str(preview_png),
+            "-i",
+            str(mp3_path),
+            "-t",
+            f"{INTRO_SEC}",
+            "-vf",
+            f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
+            f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=black",
+            "-r",
+            str(INTRO_FPS),
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-b:a",
+            INTRO_AUDIO_BITRATE,
+            "-ar",
+            str(INTRO_AUDIO_SR),
+            "-ac",
+            str(INTRO_AUDIO_CH),
+            "-shortest",
+            str(out_mp4),
+        ]
+    )
 
 
 # =========================================================
@@ -387,7 +446,11 @@ def build_preview_png(parent_dir: Path) -> Path:
         font = ImageFont.truetype(str(font_path), font_size)
         lines = wrap_lines(draw, title_text, font, max_w=max_w)
         text_h = calc_total_text_height(font, len(lines))
-        if (not AUTO_SHRINK) or (font_size <= MIN_FONT_SIZE) or (text_h <= max_h and len(lines) <= 4):
+        if (
+            (not AUTO_SHRINK)
+            or (font_size <= MIN_FONT_SIZE)
+            or (text_h <= max_h and len(lines) <= 4)
+        ):
             break
         font_size -= 2
 
@@ -423,10 +486,18 @@ def build_preview_png(parent_dir: Path) -> Path:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--folder_name", default=None, help="上部FOLDER_NAMEを上書き")
-    ap.add_argument("--parent_dir", default=None, help="folder_nameを使わずフルパス指定")
-    ap.add_argument("--preset", type=int, default=None, help="TITLE_STYLE_PRESET を上書き (1-3)")
-    ap.add_argument("--intro_sec", type=float, default=None, help="INTRO_SEC を上書き (e.g. 0.7)")
-    ap.add_argument("--start_mp3", default=None, help="startのmp3ファイル名を固定（省略なら最新）")
+    ap.add_argument(
+        "--parent_dir", default=None, help="folder_nameを使わずフルパス指定"
+    )
+    ap.add_argument(
+        "--preset", type=int, default=None, help="TITLE_STYLE_PRESET を上書き (1-3)"
+    )
+    ap.add_argument(
+        "--intro_sec", type=float, default=None, help="INTRO_SEC を上書き (e.g. 0.7)"
+    )
+    ap.add_argument(
+        "--start_mp3", default=None, help="startのmp3ファイル名を固定（省略なら最新）"
+    )
     args = ap.parse_args()
 
     global TITLE_STYLE_PRESET, INTRO_SEC, START_MP3_NAME
@@ -442,7 +513,9 @@ def main() -> int:
     else:
         folder = args.folder_name if args.folder_name else FOLDER_NAME
         if not folder:
-            raise SystemExit("FOLDER_NAME が空です。上部のFOLDER_NAMEか --folder_name を指定してください。")
+            raise SystemExit(
+                "FOLDER_NAME が空です。上部のFOLDER_NAMEか --folder_name を指定してください。"
+            )
         parent_dir = PLAN_ROOT / folder
 
     # 1) preview.png

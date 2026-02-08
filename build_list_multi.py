@@ -24,24 +24,27 @@ if not DB_PATH:
     raise SystemExit("DB_PATH が未設定です（girlsChannel.env を確認してください）")
 
 PAGE_FROM = 1
-PAGE_TO   = 15
+PAGE_TO = 15
 
-TARGET_NEW_COUNT = 1000          # 追加保存（新規 or 更新）した件数がこれに達したら終了（全カテゴリ合算）
-MIN_COMMENTS = 1000              # ★このコメント数以上だけ保存
-UPDATE_EXISTING = False          # ★既存IDも更新するならTrue（基本False推奨）
+TARGET_NEW_COUNT = (
+    1000  # 追加保存（新規 or 更新）した件数がこれに達したら終了（全カテゴリ合算）
+)
+MIN_COMMENTS = 1000  # ★このコメント数以上だけ保存
+UPDATE_EXISTING = False  # ★既存IDも更新するならTrue（基本False推奨）
 
 HEADLESS = True
 SLEEP_SEC = 0.6
 TIMEOUT_MS = 30000
 
-ECHO_EACH_SAVE = True            # 保存ごとにターミナル表示
-EARLY_STOP_PAGES = 2             # 保存0件ページが連続したら終了（0で無効）※カテゴリごとに判定
+ECHO_EACH_SAVE = True  # 保存ごとにターミナル表示
+EARLY_STOP_PAGES = 2  # 保存0件ページが連続したら終了（0で無効）※カテゴリごとに判定
 
 # 投稿用タイトルだけ作る（post_tags / post_desc は廃止）
 ENABLE_POST_TITLE = True
 
 # ★タグ学習用カラム（このスクリプトは作成だけ。値更新は別スクリプト担当）
 ENABLE_TAG_LEARNING_COLUMNS = True
+
 
 # ★取得対象カテゴリ（追加：ニュース/政治経済）
 # - gossip は現状維持（sort=comment, date=y）
@@ -51,6 +54,7 @@ class CategoryConfig:
     name: str
     base_url: str
     params: str
+
 
 CATEGORIES: List[CategoryConfig] = [
     CategoryConfig(
@@ -99,6 +103,7 @@ CREATE INDEX IF NOT EXISTS idx_items_sort_cc_desc_pd_asc
 
 RE_TOPIC_HREF = re.compile(r"/topics/(\d+)/")
 
+
 def connect(db_path: Path) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(str(db_path), timeout=30)
@@ -107,6 +112,7 @@ def connect(db_path: Path) -> sqlite3.Connection:
     con.executescript(DDL)
     con.commit()
     return con
+
 
 def ensure_columns(con: sqlite3.Connection) -> None:
     """
@@ -121,7 +127,9 @@ def ensure_columns(con: sqlite3.Connection) -> None:
 
     # ★check_create（デフォルト0）
     if "check_create" not in cols:
-        con.execute("ALTER TABLE items ADD COLUMN check_create INTEGER NOT NULL DEFAULT 0;")
+        con.execute(
+            "ALTER TABLE items ADD COLUMN check_create INTEGER NOT NULL DEFAULT 0;"
+        )
 
     # NULLの可能性があるので0埋め
     con.execute("UPDATE items SET check_create=0 WHERE check_create IS NULL;")
@@ -134,8 +142,13 @@ def ensure_columns(con: sqlite3.Connection) -> None:
 
     con.commit()
 
+
 def exists_id(con: sqlite3.Connection, tid: str) -> bool:
-    return con.execute("SELECT 1 FROM items WHERE id=? LIMIT 1", (tid,)).fetchone() is not None
+    return (
+        con.execute("SELECT 1 FROM items WHERE id=? LIMIT 1", (tid,)).fetchone()
+        is not None
+    )
+
 
 def upsert(con: sqlite3.Connection, row: Dict[str, Any]) -> None:
     """
@@ -155,20 +168,25 @@ def upsert(con: sqlite3.Connection, row: Dict[str, Any]) -> None:
       title=excluded.title,
       post_title=excluded.post_title
     """
-    con.execute(sql, (
-        row["id"],
-        int(row.get("check_create", 0)),
-        row["check_date"],
-        row["post_date"],
-        int(row["comments_count"]),
-        row["category"],
-        row["title"],
-        row.get("post_title"),
-    ))
+    con.execute(
+        sql,
+        (
+            row["id"],
+            int(row.get("check_create", 0)),
+            row["check_date"],
+            row["post_date"],
+            int(row["comments_count"]),
+            row["category"],
+            row["title"],
+            row.get("post_title"),
+        ),
+    )
+
 
 def digits_only_int(s: str) -> int:
     nums = re.findall(r"\d+", (s or "").replace(",", ""))
     return int("".join(nums)) if nums else 0
+
 
 def normalize_post_date(raw: str) -> str:
     txt = (raw or "").strip()
@@ -180,12 +198,15 @@ def normalize_post_date(raw: str) -> str:
     except Exception:
         return txt
 
+
 def short(s: str, n: int = 70) -> str:
     s = (s or "").replace("\n", " ").strip()
     return s if len(s) <= n else s[: n - 1] + "…"
 
+
 def build_page_url(cfg: CategoryConfig, page_no: int) -> str:
     return f"{cfg.base_url}/{page_no}/" + (cfg.params or "")
+
 
 def build_post_title(title: str) -> str:
     raw = (title or "").strip()
@@ -196,6 +217,7 @@ def build_post_title(title: str) -> str:
     core = re.sub(r"(パート|Part|PART)\s*\d+\s*$", "", core).strip()
     core = re.sub(r"\s{2,}", " ", core).strip(" 　-–—_:：")
     return core if core else raw
+
 
 def main():
     if TARGET_NEW_COUNT <= 0:
@@ -231,10 +253,16 @@ def main():
         print(f"  - {c.name}: {c.base_url}/?{(c.params or '').lstrip('?')}")
     print(f"[INFO] early_stop_pages(per_category): {EARLY_STOP_PAGES}")
     print(f"[INFO] post_title: {ENABLE_POST_TITLE}")
-    print("[INFO] check_create: 0=未処理 / 1=処理対象 / 2=完了（※このスクリプトは新規0、既存は上書きしない）")
-    print("[INFO] sort_rule: comments_count DESC, post_date ASC (ページ内で整列してUPSERT)")
+    print(
+        "[INFO] check_create: 0=未処理 / 1=処理対象 / 2=完了（※このスクリプトは新規0、既存は上書きしない）"
+    )
+    print(
+        "[INFO] sort_rule: comments_count DESC, post_date ASC (ページ内で整列してUPSERT)"
+    )
     if ENABLE_TAG_LEARNING_COLUMNS:
-        print("[INFO] tag_learning_columns: keywords_raw / keywords_keep / keywords_drop (added if missing)")
+        print(
+            "[INFO] tag_learning_columns: keywords_raw / keywords_keep / keywords_drop (added if missing)"
+        )
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=HEADLESS)
@@ -249,7 +277,9 @@ def main():
                 if saved >= TARGET_NEW_COUNT:
                     break
 
-                print(f"\n[CATEGORY] {cfg.name}  base={cfg.base_url}  params={cfg.params}")
+                print(
+                    f"\n[CATEGORY] {cfg.name}  base={cfg.base_url}  params={cfg.params}"
+                )
                 consecutive_no_save_pages = 0  # カテゴリごとにリセット
 
                 for page_no in range(PAGE_FROM, PAGE_TO + 1):
@@ -260,11 +290,15 @@ def main():
                     url = build_page_url(cfg, page_no)
 
                     try:
-                        resp = page.goto(url, wait_until="domcontentloaded", timeout=TIMEOUT_MS)
+                        resp = page.goto(
+                            url, wait_until="domcontentloaded", timeout=TIMEOUT_MS
+                        )
                         status = resp.status if resp else None
                         if (not resp) or (status and status >= 400):
                             failed_page += 1
-                            print(f"[PAGE_FAIL] cat={cfg.name} page={page_no} status={status} url={url}")
+                            print(
+                                f"[PAGE_FAIL] cat={cfg.name} page={page_no} status={status} url={url}"
+                            )
                             time.sleep(SLEEP_SEC)
                             continue
                     except PWTimeoutError:
@@ -273,7 +307,9 @@ def main():
                         time.sleep(SLEEP_SEC)
                         continue
 
-                    li_locator = page.locator("xpath=/html/body/div[1]/div[1]/div[1]/ul[2]/li")
+                    li_locator = page.locator(
+                        "xpath=/html/body/div[1]/div[1]/div[1]/ul[2]/li"
+                    )
                     li_count = li_locator.count()
                     if li_count == 0:
                         print(f"[NO_ITEMS] cat={cfg.name} page={page_no} url={url}")
@@ -285,7 +321,9 @@ def main():
                     for idx in range(1, li_count + 1):
                         seen += 1
 
-                        a = page.locator(f"xpath=/html/body/div[1]/div[1]/div[1]/ul[2]/li[{idx}]/a").first
+                        a = page.locator(
+                            f"xpath=/html/body/div[1]/div[1]/div[1]/ul[2]/li[{idx}]/a"
+                        ).first
                         href = a.get_attribute("href") or ""
                         m = RE_TOPIC_HREF.search(href)
                         if not m:
@@ -294,15 +332,27 @@ def main():
                         tid = m.group(1)
 
                         try:
-                            comments_raw = page.locator(
-                                f"xpath=/html/body/div[1]/div[1]/div[1]/ul[2]/li[{idx}]/a/div/p/span[2]"
-                            ).first.inner_text(timeout=5000).strip()
-                            post_raw = page.locator(
-                                f"xpath=/html/body/div[1]/div[1]/div[1]/ul[2]/li[{idx}]/a/div/p/span[3]"
-                            ).first.inner_text(timeout=5000).strip()
-                            title = page.locator(
-                                f"xpath=/html/body/div[1]/div[1]/div[1]/ul[2]/li[{idx}]/a/p"
-                            ).first.inner_text(timeout=5000).strip()
+                            comments_raw = (
+                                page.locator(
+                                    f"xpath=/html/body/div[1]/div[1]/div[1]/ul[2]/li[{idx}]/a/div/p/span[2]"
+                                )
+                                .first.inner_text(timeout=5000)
+                                .strip()
+                            )
+                            post_raw = (
+                                page.locator(
+                                    f"xpath=/html/body/div[1]/div[1]/div[1]/ul[2]/li[{idx}]/a/div/p/span[3]"
+                                )
+                                .first.inner_text(timeout=5000)
+                                .strip()
+                            )
+                            title = (
+                                page.locator(
+                                    f"xpath=/html/body/div[1]/div[1]/div[1]/ul[2]/li[{idx}]/a/p"
+                                )
+                                .first.inner_text(timeout=5000)
+                                .strip()
+                            )
                         except PWTimeoutError:
                             failed_item += 1
                             continue
@@ -320,7 +370,7 @@ def main():
 
                         row: Dict[str, Any] = {
                             "id": tid,
-                            "check_create": 0,     # 新規は必ず0
+                            "check_create": 0,  # 新規は必ず0
                             "check_date": check_date,
                             "post_date": post_date,
                             "comments_count": comments_count,
@@ -334,7 +384,12 @@ def main():
                         page_rows.append((idx, row))
 
                     # ソート: comments_count DESC, post_date ASC
-                    page_rows.sort(key=lambda t: (-int(t[1]["comments_count"]), str(t[1]["post_date"])))
+                    page_rows.sort(
+                        key=lambda t: (
+                            -int(t[1]["comments_count"]),
+                            str(t[1]["post_date"]),
+                        )
+                    )
 
                     page_saved = 0
                     for orig_idx, row in page_rows:
@@ -352,8 +407,8 @@ def main():
                             print(
                                 f"[OK] cat={cfg.name} page={page_no} li={orig_idx} saved={saved} id={row['id']} "
                                 f"post={row['post_date']} c={row['comments_count']} "
-                                f"title={short(row['title'],60)} "
-                                f"post_title={short(row.get('post_title') or '',40)} "
+                                f"title={short(row['title'], 60)} "
+                                f"post_title={short(row.get('post_title') or '', 40)} "
                                 f"check_create=0"
                             )
 
@@ -363,8 +418,13 @@ def main():
                             f"[NO_SAVE] cat={cfg.name} page={page_no} consecutive={consecutive_no_save_pages} "
                             f"(under_min_total={skipped_under_min}, exists_total={skipped_exists}, failed_total={failed_item})"
                         )
-                        if EARLY_STOP_PAGES > 0 and consecutive_no_save_pages >= EARLY_STOP_PAGES:
-                            print("[EARLY_STOP] no saved items for consecutive pages (this category) -> stop this category")
+                        if (
+                            EARLY_STOP_PAGES > 0
+                            and consecutive_no_save_pages >= EARLY_STOP_PAGES
+                        ):
+                            print(
+                                "[EARLY_STOP] no saved items for consecutive pages (this category) -> stop this category"
+                            )
                             break
                     else:
                         consecutive_no_save_pages = 0
@@ -380,10 +440,17 @@ def main():
 
     print("\n[SUMMARY]")
     print(f"  saved={saved} target={TARGET_NEW_COUNT}")
-    print(f"  pages_done={pages_done} range={PAGE_FROM}..{PAGE_TO}  categories={len(CATEGORIES)}")
-    print(f"  seen={seen} under_min={skipped_under_min} skipped_exists={skipped_exists} failed_item={failed_item} failed_page={failed_page}")
+    print(
+        f"  pages_done={pages_done} range={PAGE_FROM}..{PAGE_TO}  categories={len(CATEGORIES)}"
+    )
+    print(
+        f"  seen={seen} under_min={skipped_under_min} skipped_exists={skipped_exists} failed_item={failed_item} failed_page={failed_page}"
+    )
     if saved == 0:
-        print("  [WARN] 保存が0件です。MIN_COMMENTSが高すぎる/ページ範囲が新しすぎる可能性があります。")
+        print(
+            "  [WARN] 保存が0件です。MIN_COMMENTSが高すぎる/ページ範囲が新しすぎる可能性があります。"
+        )
+
 
 if __name__ == "__main__":
     main()

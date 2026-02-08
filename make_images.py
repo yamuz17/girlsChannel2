@@ -32,7 +32,9 @@ CFG = queue_db.build_queue_config_from_env()
 
 BASE_OUTPUT_ROOT = Path(queue_db._env_str("BASE_OUTPUT_ROOT", "")).expanduser()
 
-PICK_ORDER = queue_db._env_str("PICK_ORDER", "post_date_desc").strip() or "post_date_desc"
+PICK_ORDER = (
+    queue_db._env_str("PICK_ORDER", "post_date_desc").strip() or "post_date_desc"
+)
 
 STA_03 = queue_db._env_int("STA_03", 2)
 END_03 = queue_db._env_int("END_03", 3)
@@ -45,7 +47,9 @@ JP_FONT_CANDIDATES = [p.strip() for p in JP_FONT_PATHS_ENV.split(";") if p.strip
     "/System/Library/Fonts/ヒラギノ明朝 ProN W6.ttc",
     "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
 ]
-EMOJI_FONT_PATH = queue_db._env_str("EMOJI_FONT_PATH", "/System/Library/Fonts/Apple Color Emoji.ttc").strip()
+EMOJI_FONT_PATH = queue_db._env_str(
+    "EMOJI_FONT_PATH", "/System/Library/Fonts/Apple Color Emoji.ttc"
+).strip()
 
 # =========================
 # 入出力（フォルダ内）
@@ -160,10 +164,10 @@ def grapheme_clusters(s: str) -> List[str]:
     prev_was_zwj = False
     for ch in s:
         o = ord(ch)
-        is_zwj = (o == 0x200D)
-        is_vs16 = (o == 0xFE0F)
-        is_skin = (0x1F3FB <= o <= 0x1F3FF)
-        is_comb = (0x0300 <= o <= 0x036F)
+        is_zwj = o == 0x200D
+        is_vs16 = o == 0xFE0F
+        is_skin = 0x1F3FB <= o <= 0x1F3FF
+        is_comb = 0x0300 <= o <= 0x036F
 
         if not buf:
             buf = ch
@@ -182,7 +186,11 @@ def grapheme_clusters(s: str) -> List[str]:
 def is_emoji_cluster(cluster: str) -> bool:
     for ch in cluster:
         o = ord(ch)
-        if (0x1F300 <= o <= 0x1FAFF) or (0x2600 <= o <= 0x27BF) or (0x1F1E6 <= o <= 0x1F1FF):
+        if (
+            (0x1F300 <= o <= 0x1FAFF)
+            or (0x2600 <= o <= 0x27BF)
+            or (0x1F1E6 <= o <= 0x1F1FF)
+        ):
             return True
     return False
 
@@ -200,8 +208,20 @@ def shorten_title_step(s: str, level: int) -> str:
 
     if level >= 1:
         junk = [
-            "最終結果", "結果まとめ", "まとめ", "完全版", "速報", "解説", "一覧", "総まとめ",
-            "徹底解説", "全まとめ", "完全まとめ", "最終", "決定版", "保存版",
+            "最終結果",
+            "結果まとめ",
+            "まとめ",
+            "完全版",
+            "速報",
+            "解説",
+            "一覧",
+            "総まとめ",
+            "徹底解説",
+            "全まとめ",
+            "完全まとめ",
+            "最終",
+            "決定版",
+            "保存版",
         ]
         for w in junk:
             s = s.replace(w, "")
@@ -251,7 +271,9 @@ def cluster_em_width_guess(cluster: str) -> float:
     return 0.7
 
 
-def estimate_initial_font_size(text: str, box_w: int, max_lines: int, max_size: int, min_size: int) -> int:
+def estimate_initial_font_size(
+    text: str, box_w: int, max_lines: int, max_size: int, min_size: int
+) -> int:
     clusters = [cl for cl in grapheme_clusters(text) if cl != "\n"]
     if not clusters:
         return min_size
@@ -267,7 +289,9 @@ def estimate_initial_font_size(text: str, box_w: int, max_lines: int, max_size: 
 
 
 # ======= 計測（advance / bbox） =======
-def _text_advance_w(draw: ImageDraw.ImageDraw, s: str, font: ImageFont.ImageFont) -> int:
+def _text_advance_w(
+    draw: ImageDraw.ImageDraw, s: str, font: ImageFont.ImageFont
+) -> int:
     try:
         return int(draw.textlength(s, font=font))
     except Exception:
@@ -285,7 +309,9 @@ def _text_bbox_h(draw: ImageDraw.ImageDraw, s: str, font: ImageFont.ImageFont) -
     return int(bbox[3] - bbox[1])
 
 
-def safe_draw_text(draw: ImageDraw.ImageDraw, xy, text, font, fill, embedded_color: bool = False):
+def safe_draw_text(
+    draw: ImageDraw.ImageDraw, xy, text, font, fill, embedded_color: bool = False
+):
     try:
         draw.text(xy, text, font=font, fill=fill, embedded_color=embedded_color)
     except TypeError:
@@ -294,10 +320,12 @@ def safe_draw_text(draw: ImageDraw.ImageDraw, xy, text, font, fill, embedded_col
         draw.text(xy, text, font=font, fill=fill)
 
 
-def line_bounds_clusters(draw: ImageDraw.ImageDraw, line: str, font, emoji_font) -> Tuple[int, int]:
+def line_bounds_clusters(
+    draw: ImageDraw.ImageDraw, line: str, font, emoji_font
+) -> Tuple[int, int]:
     cx = 0
     min_left = 10**9
-    max_right = -10**9
+    max_right = -(10**9)
 
     for cl in grapheme_clusters(line):
         use_emoji = bool(emoji_font and is_emoji_cluster(cl))
@@ -319,7 +347,9 @@ def line_width_actual(draw: ImageDraw.ImageDraw, line: str, font, emoji_font) ->
     return int(r - l)
 
 
-def draw_text_clusters(draw: ImageDraw.ImageDraw, x: int, y: int, text: str, font, emoji_font, fill):
+def draw_text_clusters(
+    draw: ImageDraw.ImageDraw, x: int, y: int, text: str, font, emoji_font, fill
+):
     cx = x
     for cl in grapheme_clusters(text):
         use_emoji = bool(emoji_font and is_emoji_cluster(cl))
@@ -328,7 +358,9 @@ def draw_text_clusters(draw: ImageDraw.ImageDraw, x: int, y: int, text: str, fon
         cx += _text_advance_w(draw, cl, f)
 
 
-def wrap_text_clusters(draw: ImageDraw.ImageDraw, text: str, font, emoji_font, max_w: int) -> List[str]:
+def wrap_text_clusters(
+    draw: ImageDraw.ImageDraw, text: str, font, emoji_font, max_w: int
+) -> List[str]:
     lines: List[str] = []
     buf: List[str] = []
 
@@ -354,7 +386,9 @@ def wrap_text_clusters(draw: ImageDraw.ImageDraw, text: str, font, emoji_font, m
     return lines
 
 
-def ellipsize_line_to_width(draw: ImageDraw.ImageDraw, line: str, font, emoji_font, max_w: int) -> str:
+def ellipsize_line_to_width(
+    draw: ImageDraw.ImageDraw, line: str, font, emoji_font, max_w: int
+) -> str:
     ell = "…"
     ell_w = line_width_actual(draw, ell, font, emoji_font)
 
@@ -368,7 +402,14 @@ def ellipsize_line_to_width(draw: ImageDraw.ImageDraw, line: str, font, emoji_fo
     return ell
 
 
-def ellipsize_lines_to_fit(draw: ImageDraw.ImageDraw, lines: List[str], max_lines: int, font, emoji_font, max_w: int) -> List[str]:
+def ellipsize_lines_to_fit(
+    draw: ImageDraw.ImageDraw,
+    lines: List[str],
+    max_lines: int,
+    font,
+    emoji_font,
+    max_w: int,
+) -> List[str]:
     if len(lines) <= max_lines:
         out: List[str] = []
         for ln in lines:
@@ -383,7 +424,9 @@ def ellipsize_lines_to_fit(draw: ImageDraw.ImageDraw, lines: List[str], max_line
     return cut
 
 
-def compute_line_step(draw: ImageDraw.ImageDraw, size: int, font, line_mult: float) -> int:
+def compute_line_step(
+    draw: ImageDraw.ImageDraw, size: int, font, line_mult: float
+) -> int:
     base_h = _text_bbox_h(draw, "あ", font)
     return max(int(size * line_mult), base_h + 6)
 
@@ -413,7 +456,14 @@ def fit_text_autosize(
         emoji_font = load_emoji_font(size)
 
         lines = wrap_text_clusters(draw, text, font, emoji_font, max_w=fit_w)
-        lines = ellipsize_lines_to_fit(draw, lines, max_lines=max_lines, font=font, emoji_font=emoji_font, max_w=fit_w)
+        lines = ellipsize_lines_to_fit(
+            draw,
+            lines,
+            max_lines=max_lines,
+            font=font,
+            emoji_font=emoji_font,
+            max_w=fit_w,
+        )
 
         line_step = compute_line_step(draw, size, font, line_mult)
         total_h = line_step * len(lines)
@@ -447,7 +497,9 @@ def fit_text_autosize(
     font = load_font_from_candidates(min_size)
     emoji_font = load_emoji_font(min_size)
     lines = wrap_text_clusters(draw, text, font, emoji_font, max_w=fit_w)
-    lines = ellipsize_lines_to_fit(draw, lines, max_lines=max_lines, font=font, emoji_font=emoji_font, max_w=fit_w)
+    lines = ellipsize_lines_to_fit(
+        draw, lines, max_lines=max_lines, font=font, emoji_font=emoji_font, max_w=fit_w
+    )
     line_step = compute_line_step(draw, min_size, font, line_mult)
     total_h = line_step * len(lines)
     return lines, font, emoji_font, line_step, total_h
@@ -470,7 +522,15 @@ def fit_text_autosize_flexible_lines(
 
     for max_lines in range(max_lines_start, max_lines_cap + 1):
         lines, font, emoji_font, line_step, total_h = fit_text_autosize(
-            draw, text, box_w, box_h, max_size, min_size, max_lines, line_mult, target_fill
+            draw,
+            text,
+            box_w,
+            box_h,
+            max_size,
+            min_size,
+            max_lines,
+            line_mult,
+            target_fill,
         )
         if total_h > box_h:
             continue
@@ -491,7 +551,17 @@ def fit_text_autosize_flexible_lines(
     if best is not None:
         return best
 
-    return fit_text_autosize(draw, text, box_w, box_h, max_size, min_size, max_lines_cap, line_mult, target_fill)
+    return fit_text_autosize(
+        draw,
+        text,
+        box_w,
+        box_h,
+        max_size,
+        min_size,
+        max_lines_cap,
+        line_mult,
+        target_fill,
+    )
 
 
 def calc_start_y(box_h: int, total_h: int) -> int:
@@ -500,7 +570,9 @@ def calc_start_y(box_h: int, total_h: int) -> int:
     return 0
 
 
-def _line_start_x_for_bbox(draw: ImageDraw.ImageDraw, base_x: int, line: str, font, emoji_font) -> int:
+def _line_start_x_for_bbox(
+    draw: ImageDraw.ImageDraw, base_x: int, line: str, font, emoji_font
+) -> int:
     left, _ = line_bounds_clusters(draw, line, font, emoji_font)
     if left < 0:
         return base_x - left
@@ -509,19 +581,27 @@ def _line_start_x_for_bbox(draw: ImageDraw.ImageDraw, base_x: int, line: str, fo
 
 def try_fit_title(draw: ImageDraw.ImageDraw, title: str, box_w: int, box_h: int):
     lines, font, emoji_font, line_step, total_h = fit_text_autosize_flexible_lines(
-        draw, title, box_w, box_h,
-        TITLE_FONT_MAX, TITLE_FONT_MIN,
-        TITLE_MAX_LINES_START, TITLE_MAX_LINES_CAP,
-        TITLE_LINE_MULT, TARGET_FILL
+        draw,
+        title,
+        box_w,
+        box_h,
+        TITLE_FONT_MAX,
+        TITLE_FONT_MIN,
+        TITLE_MAX_LINES_START,
+        TITLE_MAX_LINES_CAP,
+        TITLE_LINE_MULT,
+        TARGET_FILL,
     )
-    ok = (total_h <= box_h)
+    ok = total_h <= box_h
     return ok, (lines, font, emoji_font, line_step, total_h)
 
 
 def make_title_png(title: str, out_path: Path):
     img = Image.new("RGBA", (TITLE_W, TITLE_H), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
-    d.rounded_rectangle([0, 0, TITLE_W, TITLE_H], radius=RADIUS, fill=(0, 0, 0, BG_ALPHA))
+    d.rounded_rectangle(
+        [0, 0, TITLE_W, TITLE_H], radius=RADIUS, fill=(0, 0, 0, BG_ALPHA)
+    )
 
     box_w = TITLE_W - PADDING_X * 2
     box_h = TITLE_H - PADDING_Y * 2
@@ -561,7 +641,9 @@ def make_title_png(title: str, out_path: Path):
 def make_comment_png(rank: int, text: str, out_path: Path):
     img = Image.new("RGBA", (COMMENT_W, COMMENT_H), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
-    d.rounded_rectangle([0, 0, COMMENT_W, COMMENT_H], radius=RADIUS, fill=(0, 0, 0, BG_ALPHA))
+    d.rounded_rectangle(
+        [0, 0, COMMENT_W, COMMENT_H], radius=RADIUS, fill=(0, 0, 0, BG_ALPHA)
+    )
 
     line_text = f"{rank}位：{text}".strip()
 
@@ -569,9 +651,15 @@ def make_comment_png(rank: int, text: str, out_path: Path):
     box_h = COMMENT_H - PADDING_Y * 2
 
     lines, font, emoji_font, line_step, total_h = fit_text_autosize(
-        d, line_text, box_w, box_h,
-        COMMENT_FONT_MAX, COMMENT_FONT_MIN,
-        COMMENT_MAX_LINES, COMMENT_LINE_MULT, TARGET_FILL
+        d,
+        line_text,
+        box_w,
+        box_h,
+        COMMENT_FONT_MAX,
+        COMMENT_FONT_MIN,
+        COMMENT_MAX_LINES,
+        COMMENT_LINE_MULT,
+        TARGET_FILL,
     )
 
     y = PADDING_Y + calc_start_y(box_h, total_h)
@@ -587,7 +675,9 @@ def make_comment_png(rank: int, text: str, out_path: Path):
 def main() -> int:
     print(f"[INFO] {queue_db.now_jst()}")
     print(f"[INFO] DB: {CFG.db_path}")
-    print(f"[INFO] table={CFG.table} STA_03={STA_03} END_03={END_03} order={PICK_ORDER}")
+    print(
+        f"[INFO] table={CFG.table} STA_03={STA_03} END_03={END_03} order={PICK_ORDER}"
+    )
     print(f"[INFO] BASE_OUTPUT_ROOT: {BASE_OUTPUT_ROOT}")
 
     with queue_db.connect_db(CFG) as con:

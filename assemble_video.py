@@ -15,7 +15,6 @@ from typing import List, Tuple, Dict, Optional
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from pathlib import Path
 import env_loader
 from config import CFG
 
@@ -59,7 +58,9 @@ TABLE_NAME = CFG.TABLE_NAME or "items"
 
 BASE_OUTPUT_ROOT = CFG.BASE_OUTPUT_ROOT
 if not BASE_OUTPUT_ROOT:
-    raise RuntimeError("BASE_OUTPUT_ROOT が未設定です（girlsChannel.env を確認してください）")
+    raise RuntimeError(
+        "BASE_OUTPUT_ROOT が未設定です（girlsChannel.env を確認してください）"
+    )
 
 # --- 共通：SQLite運用（01/02と合わせる） ---
 BUSY_TIMEOUT_MS = CFG.BUSY_TIMEOUT_MS
@@ -77,7 +78,9 @@ END_99 = CFG.END_99
 # --- 共通：ピック順 ---
 PICK_ORDER_99 = (env_loader.env_str("PICK_ORDER_99", "") or "").strip()
 if not PICK_ORDER_99:
-    PICK_ORDER_99 = (env_loader.env_str("PICK_ORDER", "post_date_desc") or "post_date_desc").strip()
+    PICK_ORDER_99 = (
+        env_loader.env_str("PICK_ORDER", "post_date_desc") or "post_date_desc"
+    ).strip()
 
 # --- 99（動画組み立て）固有 ---
 FPS = env_loader.env_int("FPS", 30)
@@ -93,19 +96,28 @@ MIN_SEG_SEC = env_float("MIN_SEG_SEC", 0.05)  # 0.05〜0.10 推奨
 
 # Preview（冒頭に付ける）
 ENABLE_PREVIEW = env_loader.env_bool("ENABLE_PREVIEW", True)
-PREVIEW_REL = Path(env_loader.env_str("PREVIEW_REL", "image/preview/preview.mp4") or "image/preview/preview.mp4")
+PREVIEW_REL = Path(
+    env_loader.env_str("PREVIEW_REL", "image/preview/preview.mp4")
+    or "image/preview/preview.mp4"
+)
 PREVIEW_REQUIRED = env_loader.env_bool("PREVIEW_REQUIRED", True)
 
 # Ending（最後に付ける締め）
 ENABLE_ENDING = env_loader.env_bool("ENABLE_ENDING", True)
-ENDING_IMAGE_PATH = env_loader.env_path("ENDING_IMAGE_PATH", str(BASE_OUTPUT_ROOT / "image/last_01.png"))
-ENDING_AUDIO_PATH = env_loader.env_path("ENDING_AUDIO_PATH", str(BASE_OUTPUT_ROOT / "last/last.wav"))
+ENDING_IMAGE_PATH = env_loader.env_path(
+    "ENDING_IMAGE_PATH", str(BASE_OUTPUT_ROOT / "image/last_01.png")
+)
+ENDING_AUDIO_PATH = env_loader.env_path(
+    "ENDING_AUDIO_PATH", str(BASE_OUTPUT_ROOT / "last/last.wav")
+)
 ENDING_PAD_SEC = env_float("ENDING_PAD_SEC", 0.0)
 
 # BGM
 ENABLE_BGM = env_loader.env_bool("ENABLE_BGM", True)
 BGM_ODD_PATH = env_loader.env_path("BGM_ODD_PATH", str(BASE_OUTPUT_ROOT / "bgm/1.mp3"))
-BGM_EVEN_PATH = env_loader.env_path("BGM_EVEN_PATH", str(BASE_OUTPUT_ROOT / "bgm/2.mp3"))
+BGM_EVEN_PATH = env_loader.env_path(
+    "BGM_EVEN_PATH", str(BASE_OUTPUT_ROOT / "bgm/2.mp3")
+)
 BGM_VOLUME = env_float("BGM_VOLUME", 0.12)
 BGM_DUCKING = env_loader.env_bool("BGM_DUCKING", True)
 BGM_FADE_SEC = env_float("BGM_FADE_SEC", 0.30)
@@ -128,8 +140,8 @@ Y_TITLE = (0, 384)
 Y_MAIN = (384, 960)
 Y_COMMENT = (960, 1728)
 
-SIZE_TITLE = (W, Y_TITLE[1] - Y_TITLE[0])        # 1080x384
-SIZE_MAIN = (W, Y_MAIN[1] - Y_MAIN[0])           # 1080x576
+SIZE_TITLE = (W, Y_TITLE[1] - Y_TITLE[0])  # 1080x384
+SIZE_MAIN = (W, Y_MAIN[1] - Y_MAIN[0])  # 1080x576
 SIZE_COMMENT = (W, Y_COMMENT[1] - Y_COMMENT[0])  # 1080x768
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
@@ -154,14 +166,16 @@ def connect_db(db_path: Path) -> sqlite3.Connection:
 
 
 def ensure_columns(con: sqlite3.Connection) -> None:
-    cols_lower = {str(r[1]).lower() for r in con.execute(f"PRAGMA table_info({TABLE_NAME})").fetchall()}
+    cols_lower = {
+        str(r[1]).lower()
+        for r in con.execute(f"PRAGMA table_info({TABLE_NAME})").fetchall()
+    }
 
     need = {
         "check_create": "INTEGER NOT NULL DEFAULT 0",
         "folder_name": "TEXT",
         "last_error": "TEXT",
         "updated_at": "TEXT",
-
         "video_created": "INTEGER NOT NULL DEFAULT 0",
         "video_created_at": "TEXT",
         "video_uploaded": "INTEGER NOT NULL DEFAULT 0",
@@ -182,7 +196,10 @@ def pick_one(con: sqlite3.Connection) -> Optional[sqlite3.Row]:
     if PICK_ORDER_99 == "post_date_desc":
         order_sql = "post_date DESC, id DESC"
     elif PICK_ORDER_99 == "comments_desc":
-        cols_lower = {str(r[1]).lower() for r in con.execute(f"PRAGMA table_info({TABLE_NAME})").fetchall()}
+        cols_lower = {
+            str(r[1]).lower()
+            for r in con.execute(f"PRAGMA table_info({TABLE_NAME})").fetchall()
+        }
         if "comments_count" in cols_lower:
             order_sql = "comments_count DESC, id DESC"
         else:
@@ -229,7 +246,9 @@ def claim_job_atomic(con: sqlite3.Connection, item_id: int) -> bool:
                 time.sleep(LOCK_RETRY_SLEEP_SEC)
                 continue
             raise
-    raise sqlite3.OperationalError("database is locked (retry exceeded) on claim_job_atomic")
+    raise sqlite3.OperationalError(
+        "database is locked (retry exceeded) on claim_job_atomic"
+    )
 
 
 def update_stage_success(con: sqlite3.Connection, item_id: int) -> None:
@@ -251,7 +270,9 @@ def update_stage_success(con: sqlite3.Connection, item_id: int) -> None:
             )
             con.execute("COMMIT;")
             if cur.rowcount == 0:
-                raise RuntimeError(f"update_success rowcount=0: id={item_id} check_createがSTA_99({STA_99})ではない可能性")
+                raise RuntimeError(
+                    f"update_success rowcount=0: id={item_id} check_createがSTA_99({STA_99})ではない可能性"
+                )
             return
         except sqlite3.OperationalError as e:
             try:
@@ -263,7 +284,9 @@ def update_stage_success(con: sqlite3.Connection, item_id: int) -> None:
                 time.sleep(LOCK_RETRY_SLEEP_SEC)
                 continue
             raise
-    raise sqlite3.OperationalError("database is locked (retry exceeded) on update_success")
+    raise sqlite3.OperationalError(
+        "database is locked (retry exceeded) on update_success"
+    )
 
 
 def update_stage_error(con: sqlite3.Connection, item_id: int, err: str) -> None:
@@ -291,7 +314,9 @@ def update_stage_error(con: sqlite3.Connection, item_id: int, err: str) -> None:
                 time.sleep(LOCK_RETRY_SLEEP_SEC)
                 continue
             raise
-    raise sqlite3.OperationalError("database is locked (retry exceeded) on update_error")
+    raise sqlite3.OperationalError(
+        "database is locked (retry exceeded) on update_error"
+    )
 
 
 # =========================
@@ -328,7 +353,9 @@ def ensure_tools() -> None:
         die("ffmpeg が見つかりません（brew install ffmpeg 等）。")
     if shutil.which("ffprobe") is None:
         # ffmpeg に同梱が一般的だが、万一無い場合は音声検査を無効化する
-        print("[WARN] ffprobe が見つかりません。ENSURE_AUDIO_FOR_CONCAT を無効扱いにします。")
+        print(
+            "[WARN] ffprobe が見つかりません。ENSURE_AUDIO_FOR_CONCAT を無効扱いにします。"
+        )
 
 
 def run(cmd: List[str], log_path: Path) -> None:
@@ -353,13 +380,20 @@ def ffprobe_has_audio(mp4: Path) -> bool:
     if shutil.which("ffprobe") is None:
         return True  # 判定できないので「ある前提」にする（落ちたらそこで分かる）
     try:
-        out = run_capture([
-            "ffprobe", "-v", "error",
-            "-select_streams", "a:0",
-            "-show_entries", "stream=codec_type",
-            "-of", "default=nw=1:nk=1",
-            str(mp4),
-        ])
+        out = run_capture(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "a:0",
+                "-show_entries",
+                "stream=codec_type",
+                "-of",
+                "default=nw=1:nk=1",
+                str(mp4),
+            ]
+        )
         return bool(out.strip())
     except Exception:
         return False
@@ -369,12 +403,18 @@ def ffprobe_duration_sec(path: Path) -> float:
     if shutil.which("ffprobe") is None:
         return 0.0
     try:
-        out = run_capture([
-            "ffprobe", "-v", "error",
-            "-show_entries", "format=duration",
-            "-of", "default=nw=1:nk=1",
-            str(path),
-        ])
+        out = run_capture(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=nw=1:nk=1",
+                str(path),
+            ]
+        )
         return float(out) if out else 0.0
     except Exception:
         return 0.0
@@ -397,16 +437,27 @@ def ensure_audio_track(in_mp4: Path, out_mp4: Path, log_path: Path) -> Path:
 
     ch_layout = "stereo" if int(SILENCE_CH) == 2 else "mono"
     cmd = [
-        "ffmpeg", "-y",
-        "-i", str(in_mp4),
-        "-f", "lavfi", "-t", f"{dur:.6f}",
-        "-i", f"anullsrc=channel_layout={ch_layout}:sample_rate={int(SILENCE_SR)}",
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(in_mp4),
+        "-f",
+        "lavfi",
+        "-t",
+        f"{dur:.6f}",
+        "-i",
+        f"anullsrc=channel_layout={ch_layout}:sample_rate={int(SILENCE_SR)}",
         "-shortest",
-        "-c:v", "copy",
-        "-c:a", "aac",
-        "-b:a", SILENCE_BITRATE,
-        "-ar", str(int(SILENCE_SR)),
-        "-ac", str(int(SILENCE_CH)),
+        "-c:v",
+        "copy",
+        "-c:a",
+        "aac",
+        "-b:a",
+        SILENCE_BITRATE,
+        "-ar",
+        str(int(SILENCE_SR)),
+        "-ac",
+        str(int(SILENCE_CH)),
     ]
     if ENABLE_FASTSTART:
         cmd += ["-movflags", "+faststart"]
@@ -466,10 +517,14 @@ def _num_key_from_stem(p: Path) -> Tuple[int, str]:
     return (10**12, p.name)
 
 
-def collect_main_images(main_dir_candidates: List[Path], main_single_candidates: List[Path]) -> List[Path]:
+def collect_main_images(
+    main_dir_candidates: List[Path], main_single_candidates: List[Path]
+) -> List[Path]:
     for d in main_dir_candidates:
         if d.exists():
-            imgs = [p for p in d.iterdir() if p.is_file() and p.suffix.lower() in IMAGE_EXTS]
+            imgs = [
+                p for p in d.iterdir() if p.is_file() and p.suffix.lower() in IMAGE_EXTS
+            ]
             if imgs:
                 # 1,2,10 みたいな並びを自然に
                 imgs_sorted = sorted(imgs, key=_num_key_from_stem)
@@ -541,7 +596,11 @@ def concat_wavs(paths: List[Path], out_path: Path) -> None:
             if params0 is None:
                 params0 = params
             else:
-                if (params.nchannels, params.sampwidth, params.framerate) != (params0.nchannels, params0.sampwidth, params0.framerate):
+                if (params.nchannels, params.sampwidth, params.framerate) != (
+                    params0.nchannels,
+                    params0.sampwidth,
+                    params0.framerate,
+                ):
                     die(f"wav形式が一致しません: {p} / {params} vs {params0}")
             frames_all.append(wf.readframes(wf.getnframes()))
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -567,7 +626,9 @@ def safe_copy(src: Path, dst: Path) -> None:
 # =========================
 # duration調整（ズレても落ちにくくする）
 # =========================
-def fit_durations_to_total(durs: List[float], total: float, *, min_sec: float) -> List[float]:
+def fit_durations_to_total(
+    durs: List[float], total: float, *, min_sec: float
+) -> List[float]:
     """
     durs合計を total に合わせる。
     - total より長すぎる場合は全体を比率で縮める
@@ -633,7 +694,9 @@ format=rgba[tit];
 """.strip()
 
 
-def _build_fc_audio(T: float, bgm_path: Optional[Path], bgm_start: float, ducking: bool) -> str:
+def _build_fc_audio(
+    T: float, bgm_path: Optional[Path], bgm_start: float, ducking: bool
+) -> str:
     if not bgm_path:
         return f"""
 [3:a]aresample=48000,atrim=0:{T:.6f},asetpts=PTS-STARTPTS[a]
@@ -666,7 +729,9 @@ afade=t=out:st={fade_out_start:.6f}:d={float(BGM_FADE_SEC):.6f}[bgm];
 # =========================
 # 締め動画（静止画 + last.wav）生成
 # =========================
-def build_ending_video(ending_img: Path, ending_wav: Path, out_mp4: Path, log_path: Path) -> float:
+def build_ending_video(
+    ending_img: Path, ending_wav: Path, out_mp4: Path, log_path: Path
+) -> float:
     if not ending_img.exists():
         die(f"ending image not found: {ending_img}")
     if not ending_wav.exists():
@@ -677,19 +742,32 @@ def build_ending_video(ending_img: Path, ending_wav: Path, out_mp4: Path, log_pa
         die("ending audio duration is 0s")
 
     cmd = [
-        "ffmpeg", "-y",
-        "-loop", "1", "-i", str(ending_img),
-        "-i", str(ending_wav),
-        "-t", f"{T:.6f}",
-        "-vf", f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
-               f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:black,"
-               f"fps={FPS},format=yuv420p",
-        "-c:v", "libx264",
-        "-pix_fmt", "yuv420p",
-        "-c:a", "aac",
-        "-b:a", "192k",
-        "-ar", "48000",
-        "-ac", "2",
+        "ffmpeg",
+        "-y",
+        "-loop",
+        "1",
+        "-i",
+        str(ending_img),
+        "-i",
+        str(ending_wav),
+        "-t",
+        f"{T:.6f}",
+        "-vf",
+        f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
+        f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:black,"
+        f"fps={FPS},format=yuv420p",
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "192k",
+        "-ar",
+        "48000",
+        "-ac",
+        "2",
     ]
     if ENABLE_FASTSTART:
         cmd += ["-movflags", "+faststart"]
@@ -698,21 +776,35 @@ def build_ending_video(ending_img: Path, ending_wav: Path, out_mp4: Path, log_pa
     return T
 
 
-def concat_two_videos_reencode(a_mp4: Path, b_mp4: Path, out_mp4: Path, log_path: Path) -> None:
+def concat_two_videos_reencode(
+    a_mp4: Path, b_mp4: Path, out_mp4: Path, log_path: Path
+) -> None:
     fc = "[0:v][0:a][1:v][1:a]concat=n=2:v=1:a=1[v][a]"
     cmd = [
-        "ffmpeg", "-y",
-        "-i", str(a_mp4),
-        "-i", str(b_mp4),
-        "-filter_complex", fc,
-        "-map", "[v]",
-        "-map", "[a]",
-        "-c:v", "libx264",
-        "-pix_fmt", "yuv420p",
-        "-c:a", "aac",
-        "-b:a", "192k",
-        "-ar", "48000",
-        "-ac", "2",
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(a_mp4),
+        "-i",
+        str(b_mp4),
+        "-filter_complex",
+        fc,
+        "-map",
+        "[v]",
+        "-map",
+        "[a]",
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "192k",
+        "-ar",
+        "48000",
+        "-ac",
+        "2",
     ]
     if ENABLE_FASTSTART:
         cmd += ["-movflags", "+faststart"]
@@ -767,8 +859,13 @@ def run_build(parent_dir: Path, item_id: int) -> Path:
 
     # cleanup対象
     tmp_cleanup: List[Path] = [
-        tmp_video_main, tmp_video_body, tmp_video_final, tmp_ending_video,
-        tmp_audio_desc, tmp_preview_fixed, tmp_body_fixed,
+        tmp_video_main,
+        tmp_video_body,
+        tmp_video_final,
+        tmp_ending_video,
+        tmp_audio_desc,
+        tmp_preview_fixed,
+        tmp_body_fixed,
     ]
 
     if not base_dir.exists():
@@ -841,12 +938,16 @@ def run_build(parent_dir: Path, item_id: int) -> Path:
         print(f"[INFO] audio duration: {T:.3f}s")
 
         # durations をTにフィット（ズレても落ちにくくする）
-        comment_durs = fit_durations_to_total(comment_durs_raw, T, min_sec=float(MIN_SEG_SEC))
+        comment_durs = fit_durations_to_total(
+            comment_durs_raw, T, min_sec=float(MIN_SEG_SEC)
+        )
 
         bgm_path, bgm_start = pick_bgm_by_id(item_id)
         if bgm_path:
             parity = "odd" if (item_id % 2 == 1) else "even"
-            print(f"[INFO] BGM selected: id={item_id} ({parity}) -> {bgm_path.name} (start={bgm_start:.3f}s)")
+            print(
+                f"[INFO] BGM selected: id={item_id} ({parity}) -> {bgm_path.name} (start={bgm_start:.3f}s)"
+            )
         else:
             print(f"[INFO] BGM: (none) id={item_id}")
 
@@ -862,7 +963,11 @@ def run_build(parent_dir: Path, item_id: int) -> Path:
         make_concat_list(main_imgs, main_durs, main_list)
         make_concat_list(comment_imgs, comment_durs, comment_list)
 
-        ffmpeg_out_main = tmp_video_main if WRITE_TO_LOCAL_TMP else (movie_dir / "youtube_upload_body_main.mp4")
+        ffmpeg_out_main = (
+            tmp_video_main
+            if WRITE_TO_LOCAL_TMP
+            else (movie_dir / "youtube_upload_body_main.mp4")
+        )
 
         def build_cmd_main(ducking: bool) -> List[str]:
             fc_video = _build_fc_video(T)
@@ -870,26 +975,51 @@ def run_build(parent_dir: Path, item_id: int) -> Path:
             fc = (fc_video + "\n" + fc_audio).strip()
 
             cmd: List[str] = [
-                "ffmpeg", "-y",
-                "-f", "concat", "-safe", "0", "-i", str(main_list),
-                "-f", "concat", "-safe", "0", "-i", str(comment_list),
-                "-loop", "1", "-i", str(title_img),
-                "-i", str(audio_for_video),
+                "ffmpeg",
+                "-y",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                str(main_list),
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                str(comment_list),
+                "-loop",
+                "1",
+                "-i",
+                str(title_img),
+                "-i",
+                str(audio_for_video),
             ]
             if bgm_path:
                 cmd += ["-stream_loop", "-1", "-i", str(bgm_path)]
 
             cmd += [
-                "-filter_complex", fc,
-                "-map", "[v]",
-                "-map", "[a]",
-                "-t", f"{T:.6f}",
-                "-c:v", "libx264",
-                "-pix_fmt", "yuv420p",
-                "-c:a", "aac",
-                "-b:a", "192k",
-                "-ar", "48000",
-                "-ac", "2",
+                "-filter_complex",
+                fc,
+                "-map",
+                "[v]",
+                "-map",
+                "[a]",
+                "-t",
+                f"{T:.6f}",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "192k",
+                "-ar",
+                "48000",
+                "-ac",
+                "2",
             ]
             if ENABLE_FASTSTART:
                 cmd += ["-movflags", "+faststart"]
@@ -907,9 +1037,15 @@ def run_build(parent_dir: Path, item_id: int) -> Path:
                 raise
 
         # ending を付けた「ボディ」を作る
-        body_mp4 = tmp_video_body if WRITE_TO_LOCAL_TMP else (movie_dir / "youtube_upload_body.mp4")
+        body_mp4 = (
+            tmp_video_body
+            if WRITE_TO_LOCAL_TMP
+            else (movie_dir / "youtube_upload_body.mp4")
+        )
         if ENABLE_ENDING:
-            print(f"[INFO] append ending: image={ENDING_IMAGE_PATH.name} audio={ENDING_AUDIO_PATH.name}")
+            print(
+                f"[INFO] append ending: image={ENDING_IMAGE_PATH.name} audio={ENDING_AUDIO_PATH.name}"
+            )
             build_ending_video(
                 ending_img=ENDING_IMAGE_PATH,
                 ending_wav=ENDING_AUDIO_PATH,
@@ -936,8 +1072,12 @@ def run_build(parent_dir: Path, item_id: int) -> Path:
 
         if local_enable_preview:
             if ENSURE_AUDIO_FOR_CONCAT and shutil.which("ffprobe") is not None:
-                a_for_concat = ensure_audio_track(preview_mp4, tmp_preview_fixed, log_path=ffmpeg_log_fix_audio_a)
-                b_for_concat = ensure_audio_track(body_mp4, tmp_body_fixed, log_path=ffmpeg_log_fix_audio_b)
+                a_for_concat = ensure_audio_track(
+                    preview_mp4, tmp_preview_fixed, log_path=ffmpeg_log_fix_audio_a
+                )
+                b_for_concat = ensure_audio_track(
+                    body_mp4, tmp_body_fixed, log_path=ffmpeg_log_fix_audio_b
+                )
 
             print(f"[INFO] prepend preview: {a_for_concat}")
             concat_two_videos_reencode(
@@ -978,7 +1118,9 @@ def main() -> int:
     print(f"[INFO] DB_PATH={DB_PATH}")
     print(f"[INFO] BASE_OUTPUT_ROOT={BASE_OUTPUT_ROOT}")
     print(f"[INFO] stage: STA_99={STA_99} -> END_99={END_99}")
-    print(f"[INFO] sqlite: journal_mode={SQLITE_JOURNAL_MODE} synchronous={SQLITE_SYNCHRONOUS} busy_timeout_ms={BUSY_TIMEOUT_MS}")
+    print(
+        f"[INFO] sqlite: journal_mode={SQLITE_JOURNAL_MODE} synchronous={SQLITE_SYNCHRONOUS} busy_timeout_ms={BUSY_TIMEOUT_MS}"
+    )
     print(f"[INFO] MIN_SEG_SEC={MIN_SEG_SEC} CLEANUP_TMP={CLEANUP_TMP}")
     print(f"[INFO] ENSURE_AUDIO_FOR_CONCAT={ENSURE_AUDIO_FOR_CONCAT}")
 
@@ -1022,7 +1164,10 @@ def main() -> int:
         except Exception as e:
             err = f"{type(e).__name__}: {e}"
             update_stage_error(con, item_id=item_id, err=err)
-            print(f"[ERROR] failed id={item_id} kept check_create={STA_99}. {err}", file=sys.stderr)
+            print(
+                f"[ERROR] failed id={item_id} kept check_create={STA_99}. {err}",
+                file=sys.stderr,
+            )
             return 1
 
     finally:

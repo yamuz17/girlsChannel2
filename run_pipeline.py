@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
-from pathlib import Path
 from config import CFG
 
 # =========================================================
@@ -62,7 +61,7 @@ SLEEP_SEC_WHEN_EMPTY = float(CFG.SLEEP_SEC_WHEN_EMPTY)
 PASS_FOLDER_NAME_TO_05 = CFG.PASS_FOLDER_NAME_TO_05
 
 # 実行制御（CLIで指定）
-#RUN_STEPS_RAW = "list,pipeline,schedule"
+# RUN_STEPS_RAW = "list,pipeline,schedule"
 RUN_STEPS_RAW = "list"
 RUN_PIPELINE_UNTIL = "99"
 
@@ -173,7 +172,13 @@ def ensure_columns(con: sqlite3.Connection) -> None:
     con.commit()
 
 
-def update_item(con: sqlite3.Connection, item_id: int, *, check_create: int, last_error: Optional[str]) -> None:
+def update_item(
+    con: sqlite3.Connection,
+    item_id: int,
+    *,
+    check_create: int,
+    last_error: Optional[str],
+) -> None:
     con.execute(
         f"""
         UPDATE {TABLE_NAME}
@@ -197,15 +202,23 @@ def fetch_status(con: sqlite3.Connection, item_id: int) -> Tuple[int, str]:
     return (int(row["check_create"]), str(row["folder_name"]))
 
 
-def require_stage(con: sqlite3.Connection, item_id: int, expected: int, label: str) -> str:
+def require_stage(
+    con: sqlite3.Connection, item_id: int, expected: int, label: str
+) -> str:
     st, folder = fetch_status(con, item_id)
-    print(f"[STATUS] {label}: check_create={st} folder_name={'(empty)' if not folder else folder}")
+    print(
+        f"[STATUS] {label}: check_create={st} folder_name={'(empty)' if not folder else folder}"
+    )
     if st != int(expected):
-        raise RuntimeError(f"{label}: expected check_create={expected} but got {st} (id={item_id})")
+        raise RuntimeError(
+            f"{label}: expected check_create={expected} but got {st} (id={item_id})"
+        )
     return folder
 
 
-def run_script_realtime(script_path: Path, timeout: Optional[int], extra_args: Optional[List[str]] = None) -> None:
+def run_script_realtime(
+    script_path: Path, timeout: Optional[int], extra_args: Optional[List[str]] = None
+) -> None:
     if not script_path.exists():
         raise FileNotFoundError(f"script not found: {script_path}")
 
@@ -241,11 +254,13 @@ def run_script_realtime(script_path: Path, timeout: Optional[int], extra_args: O
 
     print(f"[OK] {script_path.name} finished in {fmt_sec(elapsed)}")
 
+
 def _parse_steps(raw: str) -> List[str]:
     parts = [p.strip().lower() for p in (raw or "").split(",") if p.strip()]
     if not parts or "all" in parts:
         return ["list", "pipeline", "schedule"]
     return parts
+
 
 def _pipeline_limit_tag(raw: str) -> str:
     s = (raw or "").strip().lower()
@@ -255,12 +270,15 @@ def _pipeline_limit_tag(raw: str) -> str:
         return s
     return "99"
 
+
 PIPELINE_STAGE_ORDER = ["02", "03", "04", "05", "99"]
 PIPELINE_LIMIT_TAG = _pipeline_limit_tag(RUN_PIPELINE_UNTIL)
 PIPELINE_LIMIT_IDX = PIPELINE_STAGE_ORDER.index(PIPELINE_LIMIT_TAG)
 
+
 def _stage_enabled(tag: str) -> bool:
     return PIPELINE_STAGE_ORDER.index(tag) <= PIPELINE_LIMIT_IDX
+
 
 def _stage_tag_from_value(v: int) -> Optional[str]:
     if v == STA_02:
@@ -360,7 +378,9 @@ def lock_new_job_atomic(con: sqlite3.Connection) -> Optional[sqlite3.Row]:
             return None
 
         con.execute("COMMIT;")
-        return con.execute(f"SELECT * FROM {TABLE_NAME} WHERE id=?", (int(item_id),)).fetchone()
+        return con.execute(
+            f"SELECT * FROM {TABLE_NAME} WHERE id=?", (int(item_id),)
+        ).fetchone()
 
     except Exception:
         con.execute("ROLLBACK;")
@@ -387,7 +407,9 @@ def process_one_item(con: sqlite3.Connection) -> int:
     # パイプライン上限が現在ステージより前ならスキップ
     current_tag = _stage_tag_from_value(st)
     if current_tag is not None and not _stage_enabled(current_tag):
-        print(f"[INFO] pipeline limit={PIPELINE_LIMIT_TAG} -> skip id={item_id} stage={current_tag}")
+        print(
+            f"[INFO] pipeline limit={PIPELINE_LIMIT_TAG} -> skip id={item_id} stage={current_tag}"
+        )
         return 0
 
     # ---- 02 ----
@@ -458,7 +480,9 @@ def process_one_item(con: sqlite3.Connection) -> int:
         step_line(4, total_steps, "make_preview START")
         try:
             guard_unique_stage(con, STA_05)
-            folder_name = require_stage(con, item_id, expected=STA_05, label="before 05")
+            folder_name = require_stage(
+                con, item_id, expected=STA_05, label="before 05"
+            )
 
             extra = None
             if PASS_FOLDER_NAME_TO_05:
@@ -501,9 +525,24 @@ def process_one_item(con: sqlite3.Connection) -> int:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--runs", type=int, default=RUNS_DEFAULT, help="パイプラインを回す回数（RUNS_DEFAULTがデフォ）")
-    ap.add_argument("--steps", type=str, default=RUN_STEPS_RAW, help="実行ステップ（list,pipeline,schedule / all）")
-    ap.add_argument("--until", type=str, default=RUN_PIPELINE_UNTIL, help="パイプラインの上限ステージ（02/03/04/05/99/all）")
+    ap.add_argument(
+        "--runs",
+        type=int,
+        default=RUNS_DEFAULT,
+        help="パイプラインを回す回数（RUNS_DEFAULTがデフォ）",
+    )
+    ap.add_argument(
+        "--steps",
+        type=str,
+        default=RUN_STEPS_RAW,
+        help="実行ステップ（list,pipeline,schedule / all）",
+    )
+    ap.add_argument(
+        "--until",
+        type=str,
+        default=RUN_PIPELINE_UNTIL,
+        help="パイプラインの上限ステージ（02/03/04/05/99/all）",
+    )
     args = ap.parse_args()
 
     if not DB_PATH.exists():
@@ -521,7 +560,9 @@ def main() -> int:
     print(f"[CONF] STOP_ON_ERROR     : {STOP_ON_ERROR}")
     print(f"[CONF] RESET_TO_ZERO_ON_FAIL_02: {RESET_TO_ZERO_ON_FAIL_02}")
     print(f"[CONF] SLEEP_SEC_WHEN_EMPTY: {SLEEP_SEC_WHEN_EMPTY}")
-    print(f"[CONF] sqlite journal_mode={SQLITE_JOURNAL_MODE} synchronous={SQLITE_SYNCHRONOUS} busy_timeout_ms={BUSY_TIMEOUT_MS}")
+    print(
+        f"[CONF] sqlite journal_mode={SQLITE_JOURNAL_MODE} synchronous={SQLITE_SYNCHRONOUS} busy_timeout_ms={BUSY_TIMEOUT_MS}"
+    )
 
     print(f"[CONF] STA/END 02: {STA_02}->{END_02}")
     print(f"[CONF] STA/END 03: {STA_03}->{END_03}")
@@ -544,7 +585,15 @@ def main() -> int:
     print(f"[CONF] PIPELINE_UNTIL   : {limit_tag}")
 
     # 事前に存在チェック（早期に気づける）
-    for p in (SCRIPT_LIST, SCRIPT_02, SCRIPT_03, SCRIPT_04, SCRIPT_05, SCRIPT_99, SCRIPT_SCHEDULE):
+    for p in (
+        SCRIPT_LIST,
+        SCRIPT_02,
+        SCRIPT_03,
+        SCRIPT_04,
+        SCRIPT_05,
+        SCRIPT_99,
+        SCRIPT_SCHEDULE,
+    ):
         if not p.exists():
             print(f"[WARN] script not found at startup: {p}", file=sys.stderr)
 
@@ -565,7 +614,7 @@ def main() -> int:
             ensure_columns(con)
 
             for i in range(args.runs):
-                print(f"\n[LOOP] {i+1}/{args.runs}")
+                print(f"\n[LOOP] {i + 1}/{args.runs}")
                 rc = process_one_item(con)
 
                 if rc == 0:

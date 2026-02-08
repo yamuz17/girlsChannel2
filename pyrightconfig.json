@@ -1,0 +1,6 @@
+{
+  "typeCheckingMode": "off",
+  "reportMissingImports": false,
+  "venvPath": ".",
+  "venv": ".venv"
+}

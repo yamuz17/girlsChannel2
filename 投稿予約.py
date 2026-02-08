@@ -34,7 +34,9 @@ if not _DB_PATH:
     raise SystemExit("DB_PATH が未設定です（girlsChannel.env を確認してください）")
 _BASE_OUTPUT_ROOT = CFG.BASE_OUTPUT_ROOT
 if not _BASE_OUTPUT_ROOT:
-    raise SystemExit("BASE_OUTPUT_ROOT が未設定です（girlsChannel.env を確認してください）")
+    raise SystemExit(
+        "BASE_OUTPUT_ROOT が未設定です（girlsChannel.env を確認してください）"
+    )
 
 # =============================================================================
 # 設定（ここだけ変えればOK）
@@ -45,51 +47,42 @@ CFG = {
     "TABLE_NAME": "items",
     "BASE_OUTPUT_ROOT": str(_BASE_OUTPUT_ROOT),
     "API_DIR": str(CFG.API_DIR or (_BASE_OUTPUT_ROOT / "api")),
-#    "CLIENT_JSON_NAME": "client_secrets.json",  # .json無し指定でも自動補正
+    #    "CLIENT_JSON_NAME": "client_secrets.json",  # .json無し指定でも自動補正
     "CLIENT_JSON_NAME": CFG.CLIENT_JSON_NAME,
-
     "TOKEN_NAME": CFG.TOKEN_NAME,
-
     # --- pipeline statuses ---
     "READY_STAGE": 6,
     "UPLOADING_STAGE": 7,
     "DONE_STAGE": 8,
     "FAIL_BACK_STAGE": 6,
-
     # --- video file ---
     "MOVIE_SUBDIR": "movie",
     "VIDEO_GLOB": "*.mp4",
     "PREFERRED_MP4": "youtube_upload.mp4",
-
     # --- batch behavior ---
-    "LIMIT": 1,                 # ★何本処理するか（最大）
-    "SLEEP_BETWEEN_SEC": 0.0,    # ★各アップロード間の待機（秒）
+    "LIMIT": 1,  # ★何本処理するか（最大）
+    "SLEEP_BETWEEN_SEC": 0.0,  # ★各アップロード間の待機（秒）
     "STOP_ON_FIRST_ERROR": False,  # ★1本失敗したら止める（普段はFalse推奨）
-
     # --- scheduling (JST 기준で作ってUTCに変換) ---
-    "SCHEDULE_ENABLED": True,    # ★予約公開を使うか（True推奨）
-    "START_DELAY_MIN": 2,       # ★1本目は「今から何分後」に予約するか
-    "INTERVAL_MIN": 10,           # ★2本目以降、何分刻みでずらすか（=5分刻み）
-    "OFFSET_MODE": "by_index",   # "by_index"（idx*interval） / "fixed"（全て同じ時刻）
-    "FORCE_RESCHEDULE": False,   # ★DBにpublish_atがあっても上書きするか
+    "SCHEDULE_ENABLED": True,  # ★予約公開を使うか（True推奨）
+    "START_DELAY_MIN": 2,  # ★1本目は「今から何分後」に予約するか
+    "INTERVAL_MIN": 10,  # ★2本目以降、何分刻みでずらすか（=5分刻み）
+    "OFFSET_MODE": "by_index",  # "by_index"（idx*interval） / "fixed"（全て同じ時刻）
+    "FORCE_RESCHEDULE": False,  # ★DBにpublish_atがあっても上書きするか
     "RESCHEDULE_IF_PAST": True,  # ★publish_at_utc が過去なら自動で未来に再設定するか
-    "MIN_FUTURE_BUFFER_MIN": 10, # ★再設定するなら「最低でも今から何分後」にするか
-
+    "MIN_FUTURE_BUFFER_MIN": 10,  # ★再設定するなら「最低でも今から何分後」にするか
     # --- youtube upload meta defaults ---
     "CATEGORY_ID": "22",
     "NOTIFY_SUBSCRIBERS": False,
     "MADE_FOR_KIDS": False,
     "DESCRIPTION_COMMON": "",
-
     # --- retry / robustness ---
     "RETRIABLE_STATUS_CODES": {500, 502, 503, 504},
     "MAX_RETRIES": 10,
     "BASE_SLEEP": 1.0,
-
     # --- logging ---
     "PRINT_UPLOAD_PROGRESS_EVERY_SEC": 2.0,
     "ERROR_STORE_CHARS": 12000,
-
     # --- oauth scopes ---
     "SCOPES": ["https://www.googleapis.com/auth/youtube.upload"],
 }
@@ -234,7 +227,15 @@ def ensure_columns(con: sqlite3.Connection, table_name: str) -> None:
     cur = con.execute(f"PRAGMA table_info({table_name})")
     cols = {row[1] for row in cur.fetchall()}
 
-    must = {"id", "check_create", "folder_name", "post_title", "keywords_raw", "video_created", "video_uploaded"}
+    must = {
+        "id",
+        "check_create",
+        "folder_name",
+        "post_title",
+        "keywords_raw",
+        "video_created",
+        "video_uploaded",
+    }
     missing = sorted(list(must - cols))
     if missing:
         raise RuntimeError(f"必須カラムが見つかりません: {missing}")
@@ -263,7 +264,13 @@ def ensure_columns(con: sqlite3.Connection, table_name: str) -> None:
     con.commit()
 
 
-def set_yt_status(con: sqlite3.Connection, table_name: str, job_id: str, status: str, err: Optional[str] = None) -> None:
+def set_yt_status(
+    con: sqlite3.Connection,
+    table_name: str,
+    job_id: str,
+    status: str,
+    err: Optional[str] = None,
+) -> None:
     try:
         con.execute(
             f"""
@@ -272,7 +279,7 @@ def set_yt_status(con: sqlite3.Connection, table_name: str, job_id: str, status:
                    youtube_error=?
              WHERE id=?
             """,
-            (status, None if err is None else err[:CFG["ERROR_STORE_CHARS"]], job_id),
+            (status, None if err is None else err[: CFG["ERROR_STORE_CHARS"]], job_id),
         )
         con.commit()
     except sqlite3.OperationalError:
@@ -292,7 +299,9 @@ class JobRow:
     publish_at_jst: str
 
 
-def fetch_upload_queue(con: sqlite3.Connection, table_name: str, limit: int) -> List[JobRow]:
+def fetch_upload_queue(
+    con: sqlite3.Connection, table_name: str, limit: int
+) -> List[JobRow]:
     rows = con.execute(
         f"""
         SELECT id,
@@ -322,7 +331,9 @@ def fetch_upload_queue(con: sqlite3.Connection, table_name: str, limit: int) -> 
                 id=str(r["id"]),
                 folder_name=str(r["folder_name"]),
                 post_title=str(r["post_title"]),
-                keywords_raw=None if r["keywords_raw"] is None else str(r["keywords_raw"]),
+                keywords_raw=None
+                if r["keywords_raw"] is None
+                else str(r["keywords_raw"]),
                 check_create=int(r["check_create"]),
                 video_created=int(r["video_created"]),
                 video_uploaded=int(r["video_uploaded"]),
@@ -350,7 +361,9 @@ def lock_job_5_to_6(con: sqlite3.Connection, table_name: str, job_id: str) -> No
         raise RuntimeError(f"already uploaded: id={job_id}")
     if st != CFG["READY_STAGE"]:
         con.execute("ROLLBACK;")
-        raise RuntimeError(f"expected check_create={CFG['READY_STAGE']} but got {st}: id={job_id}")
+        raise RuntimeError(
+            f"expected check_create={CFG['READY_STAGE']} but got {st}: id={job_id}"
+        )
 
     cur = con.execute(
         f"""
@@ -368,7 +381,13 @@ def lock_job_5_to_6(con: sqlite3.Connection, table_name: str, job_id: str) -> No
     con.execute("COMMIT;")
 
 
-def set_publish_at(con: sqlite3.Connection, table_name: str, job_id: str, publish_at_utc: str, publish_at_jst: str) -> None:
+def set_publish_at(
+    con: sqlite3.Connection,
+    table_name: str,
+    job_id: str,
+    publish_at_utc: str,
+    publish_at_jst: str,
+) -> None:
     con.execute(
         f"""
         UPDATE {table_name}
@@ -382,7 +401,9 @@ def set_publish_at(con: sqlite3.Connection, table_name: str, job_id: str, publis
     con.commit()
 
 
-def mark_done(con: sqlite3.Connection, table_name: str, job_id: str, video_id: str) -> None:
+def mark_done(
+    con: sqlite3.Connection, table_name: str, job_id: str, video_id: str
+) -> None:
     con.execute(
         f"""
         UPDATE {table_name}
@@ -395,12 +416,22 @@ def mark_done(con: sqlite3.Connection, table_name: str, job_id: str, video_id: s
                youtube_error=?
          WHERE id=?
         """,
-        (CFG["DONE_STAGE"], now_jst_str(), video_id, now_jst_str(), "uploaded", None, job_id),
+        (
+            CFG["DONE_STAGE"],
+            now_jst_str(),
+            video_id,
+            now_jst_str(),
+            "uploaded",
+            None,
+            job_id,
+        ),
     )
     con.commit()
 
 
-def mark_fail_back(con: sqlite3.Connection, table_name: str, job_id: str, err: str) -> None:
+def mark_fail_back(
+    con: sqlite3.Connection, table_name: str, job_id: str, err: str
+) -> None:
     con.execute(
         f"""
         UPDATE {table_name}
@@ -409,7 +440,7 @@ def mark_fail_back(con: sqlite3.Connection, table_name: str, job_id: str, err: s
                youtube_error=?
          WHERE id=?
         """,
-        (CFG["FAIL_BACK_STAGE"], "failed", err[:CFG["ERROR_STORE_CHARS"]], job_id),
+        (CFG["FAIL_BACK_STAGE"], "failed", err[: CFG["ERROR_STORE_CHARS"]], job_id),
     )
     con.commit()
 
@@ -440,7 +471,9 @@ def get_authenticated_service(client_secrets_file: Path, token_file: Path) -> An
             creds.refresh(Request())
         else:
             log("[AUTH] starting browser OAuth flow...")
-            flow = InstalledAppFlow.from_client_secrets_file(str(client_secrets_file), CFG["SCOPES"])
+            flow = InstalledAppFlow.from_client_secrets_file(
+                str(client_secrets_file), CFG["SCOPES"]
+            )
             creds = flow.run_local_server(port=0, open_browser=True)
 
         token_file.parent.mkdir(parents=True, exist_ok=True)
@@ -491,7 +524,9 @@ def upload_video(
     if publish_at_utc:
         body["status"]["publishAt"] = publish_at_utc
 
-    media = MediaFileUpload(str(video_path), mimetype="video/*", resumable=True, chunksize=1024 * 1024 * 8)
+    media = MediaFileUpload(
+        str(video_path), mimetype="video/*", resumable=True, chunksize=1024 * 1024 * 8
+    )
     request = youtube.videos().insert(
         part="snippet,status",
         body=body,
@@ -501,7 +536,9 @@ def upload_video(
 
     log(f"[UPLOAD] {video_path.name} ({fmt_bytes(size)})")
     log(f"[META] title={title}")
-    log(f"[META] tags_count={len(tags)} privacy={privacy_status} publishAt={publish_at_utc or '(none)'}")
+    log(
+        f"[META] tags_count={len(tags)} privacy={privacy_status} publishAt={publish_at_utc or '(none)'}"
+    )
 
     response = None
     retry = 0
@@ -527,9 +564,13 @@ def upload_video(
 
                     pct = int(p * 100)
                     if eta >= 0:
-                        log(f"[PROGRESS] {pct:3d}%  {fmt_bytes(uploaded)}/{fmt_bytes(size)}  {fmt_bytes(speed)}/s  ETA {eta:.0f}s")
+                        log(
+                            f"[PROGRESS] {pct:3d}%  {fmt_bytes(uploaded)}/{fmt_bytes(size)}  {fmt_bytes(speed)}/s  ETA {eta:.0f}s"
+                        )
                     else:
-                        log(f"[PROGRESS] {pct:3d}%  {fmt_bytes(uploaded)}/{fmt_bytes(size)}")
+                        log(
+                            f"[PROGRESS] {pct:3d}%  {fmt_bytes(uploaded)}/{fmt_bytes(size)}"
+                        )
 
                     if on_progress:
                         on_progress(pct)
@@ -548,7 +589,9 @@ def upload_video(
             if code in CFG["RETRIABLE_STATUS_CODES"] and retry < CFG["MAX_RETRIES"]:
                 retry += 1
                 sleep = CFG["BASE_SLEEP"] * (2 ** (retry - 1)) + random.random()
-                eprint(f"[WARN] HttpError {code}. retry={retry}/{CFG['MAX_RETRIES']} sleep={sleep:.1f}s")
+                eprint(
+                    f"[WARN] HttpError {code}. retry={retry}/{CFG['MAX_RETRIES']} sleep={sleep:.1f}s"
+                )
                 time.sleep(sleep)
                 continue
             raise RuntimeError(http_error_to_text(e))
@@ -557,7 +600,9 @@ def upload_video(
             if retry < CFG["MAX_RETRIES"]:
                 retry += 1
                 sleep = CFG["BASE_SLEEP"] * (2 ** (retry - 1)) + random.random()
-                eprint(f"[WARN] {type(e).__name__}: {e}. retry={retry}/{CFG['MAX_RETRIES']} sleep={sleep:.1f}s")
+                eprint(
+                    f"[WARN] {type(e).__name__}: {e}. retry={retry}/{CFG['MAX_RETRIES']} sleep={sleep:.1f}s"
+                )
                 time.sleep(sleep)
                 continue
             raise
@@ -674,7 +719,9 @@ def main() -> int:
         log(f"[QUEUE] found={len(queue)}")
 
         if not queue:
-            log("[INFO] queue is empty. (check_create=5 & video_created=1 & video_uploaded=0)")
+            log(
+                "[INFO] queue is empty. (check_create=5 & video_created=1 & video_uploaded=0)"
+            )
             return 0
 
         base_now = now_jst()
@@ -685,7 +732,7 @@ def main() -> int:
 
         for i, job in enumerate(queue):
             log("")
-            log(f"[ITEM] {i+1}/{len(queue)} id={job.id} folder={job.folder_name}")
+            log(f"[ITEM] {i + 1}/{len(queue)} id={job.id} folder={job.folder_name}")
 
             try:
                 # ロック（5->6）
@@ -703,7 +750,9 @@ def main() -> int:
                         need_set = True
                     elif not publish_at_utc:
                         need_set = True
-                    elif CFG["RESCHEDULE_IF_PAST"] and is_rfc3339_past(publish_at_utc, now_utc):
+                    elif CFG["RESCHEDULE_IF_PAST"] and is_rfc3339_past(
+                        publish_at_utc, now_utc
+                    ):
                         # 過去なら未来に再設定
                         need_set = True
 
@@ -711,12 +760,18 @@ def main() -> int:
                         pub_utc, pub_jst = compute_publish_time(base_now, i)
 
                         # 最低未来バッファ（安全策）
-                        min_future = now_jst() + timedelta(minutes=int(CFG["MIN_FUTURE_BUFFER_MIN"]))
+                        min_future = now_jst() + timedelta(
+                            minutes=int(CFG["MIN_FUTURE_BUFFER_MIN"])
+                        )
                         min_utc = to_rfc3339_utc(min_future.astimezone(UTC))
                         # pub_utcがmin_utcより前なら、min_future側に寄せる
                         try:
-                            dt_pub = datetime.strptime(pub_utc, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
-                            dt_min = datetime.strptime(min_utc, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+                            dt_pub = datetime.strptime(
+                                pub_utc, "%Y-%m-%dT%H:%M:%SZ"
+                            ).replace(tzinfo=UTC)
+                            dt_min = datetime.strptime(
+                                min_utc, "%Y-%m-%dT%H:%M:%SZ"
+                            ).replace(tzinfo=UTC)
                             if dt_pub < dt_min:
                                 pub_utc = min_utc
                                 pub_jst = to_jst_human(min_future)
@@ -724,11 +779,19 @@ def main() -> int:
                             pass
 
                         publish_at_utc, publish_at_jst = pub_utc, pub_jst
-                        set_publish_at(con, table_name, job.id, publish_at_utc, publish_at_jst)
-                        log(f"[SCHEDULE] set publish_at_jst={publish_at_jst} publish_at_utc={publish_at_utc}")
+                        set_publish_at(
+                            con, table_name, job.id, publish_at_utc, publish_at_jst
+                        )
+                        log(
+                            f"[SCHEDULE] set publish_at_jst={publish_at_jst} publish_at_utc={publish_at_utc}"
+                        )
                     else:
-                        log(f"[SCHEDULE] keep publish_at_jst={publish_at_jst} publish_at_utc={publish_at_utc}")
-                        set_yt_status(con, table_name, job.id, f"scheduled:{publish_at_utc}")
+                        log(
+                            f"[SCHEDULE] keep publish_at_jst={publish_at_jst} publish_at_utc={publish_at_utc}"
+                        )
+                        set_yt_status(
+                            con, table_name, job.id, f"scheduled:{publish_at_utc}"
+                        )
                 else:
                     publish_at_utc = ""
                     publish_at_jst = ""
@@ -740,7 +803,9 @@ def main() -> int:
                 video_path = find_video_mp4(movie_dir)
 
                 log(f"[PATH] video={video_path}")
-                set_yt_status(con, table_name, job.id, f"step:video_found:{video_path.name}")
+                set_yt_status(
+                    con, table_name, job.id, f"step:video_found:{video_path.name}"
+                )
 
                 # メタ
                 title = clean_title(job.post_title) or clean_title(video_path.stem)
@@ -749,10 +814,18 @@ def main() -> int:
                 description = (CFG["DESCRIPTION_COMMON"] or "").strip()
                 if tags:
                     tags_line = " ".join([f"#{t.replace(' ', '')}" for t in tags[:20]])
-                    description = (description + "\n\n" + tags_line).strip() if description else tags_line
+                    description = (
+                        (description + "\n\n" + tags_line).strip()
+                        if description
+                        else tags_line
+                    )
 
                 # 予約公開なら privacy=private が必須
-                privacy = "private" if (CFG["SCHEDULE_ENABLED"] and publish_at_utc) else "private"
+                privacy = (
+                    "private"
+                    if (CFG["SCHEDULE_ENABLED"] and publish_at_utc)
+                    else "private"
+                )
 
                 set_yt_status(con, table_name, job.id, "step:upload_start")
 
@@ -770,12 +843,18 @@ def main() -> int:
                     privacy_status=privacy,
                     notify_subscribers=bool(CFG["NOTIFY_SUBSCRIBERS"]),
                     made_for_kids=bool(CFG["MADE_FOR_KIDS"]),
-                    publish_at_utc=(publish_at_utc if (CFG["SCHEDULE_ENABLED"] and publish_at_utc) else None),
+                    publish_at_utc=(
+                        publish_at_utc
+                        if (CFG["SCHEDULE_ENABLED"] and publish_at_utc)
+                        else None
+                    ),
                     on_progress=on_prog,
                 )
 
                 mark_done(con, table_name, job.id, video_id)
-                log(f"[OK] uploaded id={job.id} videoId={video_id} publish_at_jst={publish_at_jst}")
+                log(
+                    f"[OK] uploaded id={job.id} videoId={video_id} publish_at_jst={publish_at_jst}"
+                )
                 ok += 1
 
                 if float(CFG["SLEEP_BETWEEN_SEC"]) > 0:
@@ -789,7 +868,9 @@ def main() -> int:
                 try:
                     mark_fail_back(con, table_name, job.id, tb)
                 except Exception as e2:
-                    eprint(f"[WARN] failed to write fail-back to DB: {type(e2).__name__}: {e2}")
+                    eprint(
+                        f"[WARN] failed to write fail-back to DB: {type(e2).__name__}: {e2}"
+                    )
                 ng += 1
                 if CFG["STOP_ON_FIRST_ERROR"]:
                     eprint("[STOP] STOP_ON_FIRST_ERROR=True")

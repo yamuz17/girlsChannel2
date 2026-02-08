@@ -4,7 +4,7 @@ import os
 import inspect
 import json
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict
 
 # python-dotenv が入っていれば最優先で使う
 try:
@@ -80,7 +80,9 @@ def _common_env_path(filename: str) -> Path:
     return Path.home() / "Documents" / "readOnly" / filename
 
 
-def load_env(path: Optional[Path] = None, filename: str = "girlsChannel.env") -> Dict[str, str]:
+def load_env(
+    path: Optional[Path] = None, filename: str = "girlsChannel.env"
+) -> Dict[str, str]:
     """
     .env を読み込んで os.environ に反映し、読み込んだキーを dict で返す。
     - path が None の場合：呼び出し元スクリプトと同階層の .env を読む
@@ -144,6 +146,7 @@ def env_str(name: str, default: str = "") -> str:
     v = os.environ.get(name)
     return default if v is None else str(v)
 
+
 def env_int(name: str, default: int) -> int:
     v = os.environ.get(name)
     if v is None:
@@ -153,6 +156,7 @@ def env_int(name: str, default: int) -> int:
         return int(default)
     return int(float(s))
 
+
 def env_float(name: str, default: float) -> float:
     v = os.environ.get(name)
     if v is None:
@@ -161,6 +165,7 @@ def env_float(name: str, default: float) -> float:
     if s in ("", "none", "null"):
         return float(default)
     return float(s)
+
 
 def env_bool(name: str, default: bool) -> bool:
     v = os.environ.get(name)
@@ -173,6 +178,7 @@ def env_bool(name: str, default: bool) -> bool:
         return False
     return bool(default)
 
+
 def env_optional_int(name: str, default: Optional[int]) -> Optional[int]:
     v = os.environ.get(name)
     if v is None:
@@ -184,6 +190,7 @@ def env_optional_int(name: str, default: Optional[int]) -> Optional[int]:
         return int(float(s))
     except Exception:
         return default
+
 
 def env_path(name: str, default: Optional[str]) -> Optional[Path]:
     v = os.environ.get(name)
