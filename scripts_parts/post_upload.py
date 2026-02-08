@@ -17,6 +17,11 @@ from pathlib import Path
 from typing import Any, Callable, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
+# Allow running from scripts_done/ directly.
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
@@ -47,7 +52,7 @@ CFG = {
     "TABLE_NAME": "items",
     "BASE_OUTPUT_ROOT": str(_BASE_OUTPUT_ROOT),
     "API_DIR": str(CFG.API_DIR or (_BASE_OUTPUT_ROOT / "api")),
-    #    "CLIENT_JSON_NAME": "client_secrets.json",  # .json無し指定でも自動補正
+    # "CLIENT_JSON_NAME": "client_secrets.json",  # .json無し指定でも自動補正
     "CLIENT_JSON_NAME": CFG.CLIENT_JSON_NAME,
     "TOKEN_NAME": CFG.TOKEN_NAME,
     # --- pipeline statuses ---
@@ -59,18 +64,28 @@ CFG = {
     "MOVIE_SUBDIR": "movie",
     "VIDEO_GLOB": "*.mp4",
     "PREFERRED_MP4": "youtube_upload.mp4",
+    # --- thumbnail (追加仕様) ---
+    "THUMBNAIL_ENABLED": True,  # サムネ設定を行うか
+    "THUMBNAIL_REL_PATH": "image/preview/preview.png",  # folder_name配下の固定相対パス
+    "THUMBNAIL_STRICT": False,  # Trueならサムネ無い/失敗で全体を失敗扱い
     # --- batch behavior ---
-    "LIMIT": 1,  # ★何本処理するか（最大）
-    "SLEEP_BETWEEN_SEC": 0.0,  # ★各アップロード間の待機（秒）
-    "STOP_ON_FIRST_ERROR": False,  # ★1本失敗したら止める（普段はFalse推奨）
+    "LIMIT": 3,  # 何本処理するか（最大）
+    "SLEEP_BETWEEN_SEC": 0.0,  # 各アップロード間の待機（秒）
+    "STOP_ON_FIRST_ERROR": False,  # 1本失敗したら止める（普段はFalse推奨）
     # --- scheduling (JST 기준で作ってUTCに変換) ---
-    "SCHEDULE_ENABLED": True,  # ★予約公開を使うか（True推奨）
-    "START_DELAY_MIN": 2,  # ★1本目は「今から何分後」に予約するか
-    "INTERVAL_MIN": 10,  # ★2本目以降、何分刻みでずらすか（=5分刻み）
+    "SCHEDULE_ENABLED": True,  # 予約公開を使うか
+    # ★追加：最初の動画だけ「投稿時刻指定型」にする
+    # "fixed_time" なら 1本目は FIRST_PUBLISH_TIME_JST の「次の到来時刻」に予約。
+    # 2本目以降は、その1本目の時刻を基準に INTERVAL_MIN でずらす（OFFSET_MODEに従う）
+    "FIRST_SCHEDULE_MODE": "fixed_time",  # "fixed_time" or "delay"
+    "FIRST_PUBLISH_TIME_JST": "09:30",  # "HH:MM"（JST）
+    "FIRST_TIME_BUFFER_MIN": 30,  # 1本目の固定時刻が「今+この分」より過去/近すぎるなら翌日に回す
+    "START_DELAY_MIN": 83,  # （FIRST_SCHEDULE_MODE="delay" のときに有効）1本目は「今から何分後」
+    "INTERVAL_MIN": 60,  # 2本目以降、何分刻みでずらす
     "OFFSET_MODE": "by_index",  # "by_index"（idx*interval） / "fixed"（全て同じ時刻）
-    "FORCE_RESCHEDULE": False,  # ★DBにpublish_atがあっても上書きするか
-    "RESCHEDULE_IF_PAST": True,  # ★publish_at_utc が過去なら自動で未来に再設定するか
-    "MIN_FUTURE_BUFFER_MIN": 10,  # ★再設定するなら「最低でも今から何分後」にするか
+    "FORCE_RESCHEDULE": False,  # DBにpublish_atがあっても上書きするか
+    "RESCHEDULE_IF_PAST": True,  # publish_at_utc が過去なら自動で未来に再設定するか
+    "MIN_FUTURE_BUFFER_MIN": 10,  # 再設定するなら「最低でも今から何分後」にするか
     # --- youtube upload meta defaults ---
     "CATEGORY_ID": "22",
     "NOTIFY_SUBSCRIBERS": False,
@@ -84,6 +99,7 @@ CFG = {
     "PRINT_UPLOAD_PROGRESS_EVERY_SEC": 2.0,
     "ERROR_STORE_CHARS": 12000,
     # --- oauth scopes ---
+    # thumbnails.set も通常これで足ります
     "SCOPES": ["https://www.googleapis.com/auth/youtube.upload"],
 }
 
@@ -211,6 +227,40 @@ def find_video_mp4(movie_dir: Path) -> Path:
 
 
 # =============================================================================
+# サムネ探索 & 設定（追加仕様：固定相対パス）
+# =============================================================================
+def guess_mime_from_path(p: Path) -> str:
+    s = p.suffix.lower()
+    if s in [".jpg", ".jpeg"]:
+        return "image/jpeg"
+    if s in [".png"]:
+        return "image/png"
+    return "application/octet-stream"
+
+
+def find_thumbnail_file(parent_dir: Path) -> Optional[Path]:
+    rel = str(CFG.get("THUMBNAIL_REL_PATH", "")).strip()
+    if not rel:
+        return None
+    p = parent_dir / rel
+    if p.exists() and p.is_file():
+        return p
+    return None
+
+
+def set_thumbnail(youtube: Any, video_id: str, thumb_path: Path) -> None:
+    if not thumb_path.exists():
+        raise FileNotFoundError(f"thumbnail not found: {thumb_path}")
+
+    mime = guess_mime_from_path(thumb_path)
+    req = youtube.thumbnails().set(
+        videoId=video_id,
+        media_body=MediaFileUpload(str(thumb_path), mimetype=mime),
+    )
+    req.execute()
+
+
+# =============================================================================
 # DB
 # =============================================================================
 def connect_db(db_path: Path) -> sqlite3.Connection:
@@ -252,6 +302,11 @@ def ensure_columns(con: sqlite3.Connection, table_name: str) -> None:
         ("published_at_utc", "TEXT"),
         ("video_created_at", "TEXT"),
         ("video_uploaded_at", "TEXT"),
+        # サムネ系
+        ("youtube_thumbnail_path", "TEXT"),
+        ("youtube_thumbnail_set_at", "TEXT"),
+        ("youtube_thumbnail_status", "TEXT"),
+        ("youtube_thumbnail_error", "TEXT"),
     ]:
         if name not in cols:
             add.append((name, ddl))
@@ -280,6 +335,37 @@ def set_yt_status(
              WHERE id=?
             """,
             (status, None if err is None else err[: CFG["ERROR_STORE_CHARS"]], job_id),
+        )
+        con.commit()
+    except sqlite3.OperationalError:
+        pass
+
+
+def set_thumb_status(
+    con: sqlite3.Connection,
+    table_name: str,
+    job_id: str,
+    status: str,
+    thumb_path: Optional[str] = None,
+    err: Optional[str] = None,
+) -> None:
+    try:
+        con.execute(
+            f"""
+            UPDATE {table_name}
+               SET youtube_thumbnail_status=?,
+                   youtube_thumbnail_path=?,
+                   youtube_thumbnail_set_at=?,
+                   youtube_thumbnail_error=?
+             WHERE id=?
+            """,
+            (
+                status,
+                thumb_path,
+                now_jst_str() if status in ("set", "failed") else None,
+                None if err is None else err[: CFG["ERROR_STORE_CHARS"]],
+                job_id,
+            ),
         )
         con.commit()
     except sqlite3.OperationalError:
@@ -344,7 +430,9 @@ def fetch_upload_queue(
     return out
 
 
-def lock_job_5_to_6(con: sqlite3.Connection, table_name: str, job_id: str) -> None:
+def lock_job_ready_to_uploading(
+    con: sqlite3.Connection, table_name: str, job_id: str
+) -> None:
     con.execute("BEGIN IMMEDIATE;")
     row = con.execute(
         f"SELECT check_create, COALESCE(video_uploaded,0) AS video_uploaded FROM {table_name} WHERE id=?",
@@ -352,7 +440,7 @@ def lock_job_5_to_6(con: sqlite3.Connection, table_name: str, job_id: str) -> No
     ).fetchone()
     if not row:
         con.execute("ROLLBACK;")
-        raise RuntimeError(f"id not found: {job_id}")
+        raise RuntimeError(f"id not found: id={job_id}")
 
     st = int(row["check_create"])
     vu = int(row["video_uploaded"])
@@ -373,7 +461,7 @@ def lock_job_5_to_6(con: sqlite3.Connection, table_name: str, job_id: str) -> No
                youtube_error=?
          WHERE id=? AND check_create=? AND COALESCE(video_uploaded,0)=0
         """,
-        (CFG["UPLOADING_STAGE"], "lock_to_6", None, job_id, CFG["READY_STAGE"]),
+        (CFG["UPLOADING_STAGE"], "lock_to_uploading", None, job_id, CFG["READY_STAGE"]),
     )
     if cur.rowcount != 1:
         con.execute("ROLLBACK;")
@@ -626,22 +714,69 @@ def is_rfc3339_past(publish_at_utc: str, now_utc: datetime) -> bool:
     if not s:
         return False
     try:
-        # "YYYY-MM-DDTHH:MM:SSZ"
         dt = datetime.strptime(s, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
         return dt <= now_utc
     except Exception:
-        # 形式が違う場合は安全側で「過去判定しない」
         return False
 
 
-def compute_publish_time(base_now_jst: datetime, idx0: int) -> Tuple[str, str]:
+def _parse_hhmm(s: str) -> Tuple[int, int]:
+    s = (s or "").strip()
+    m = re.fullmatch(r"(\d{1,2}):(\d{2})", s)
+    if not m:
+        raise ValueError(f"FIRST_PUBLISH_TIME_JST must be 'HH:MM' but got: {s!r}")
+    hh = int(m.group(1))
+    mm = int(m.group(2))
+    if not (0 <= hh <= 23 and 0 <= mm <= 59):
+        raise ValueError(f"invalid time: {s!r}")
+    return hh, mm
+
+
+def compute_first_fixed_time(base_now_jst: datetime) -> datetime:
+    """
+    1本目を JST の固定時刻（HH:MM）で「次の到来時刻」にする。
+    ただし「今 + FIRST_TIME_BUFFER_MIN」より前/近すぎるなら翌日に回す。
+    """
+    hh, mm = _parse_hhmm(str(CFG["FIRST_PUBLISH_TIME_JST"]))
+    buf = int(CFG.get("FIRST_TIME_BUFFER_MIN", 10))
+
+    candidate = base_now_jst.replace(hour=hh, minute=mm, second=0, microsecond=0)
+    min_ok = base_now_jst + timedelta(minutes=buf)
+    if candidate < min_ok:
+        candidate = candidate + timedelta(days=1)
+    return candidate
+
+
+def compute_publish_time(
+    base_now_jst: datetime, idx0: int, first_anchor_jst: Optional[datetime]
+) -> Tuple[str, str]:
+    """
+    publishAt を (UTC rfc3339, JST human) で返す。
+    - FIRST_SCHEDULE_MODE="fixed_time" の場合:
+        1本目は first_anchor_jst（固定時刻の次到来）
+        2本目以降は first_anchor_jst を基準に INTERVAL_MIN と OFFSET_MODE でずらす
+    - それ以外は従来の START_DELAY_MIN 基準（今から何分後）でずらす
+    """
     if not CFG["SCHEDULE_ENABLED"]:
         return ("", "")
 
-    start_delay = int(CFG["START_DELAY_MIN"])
     interval = int(CFG["INTERVAL_MIN"])
     mode = str(CFG["OFFSET_MODE"])
 
+    first_mode = str(CFG.get("FIRST_SCHEDULE_MODE", "delay")).strip().lower()
+
+    # 1本目を固定時刻にする場合
+    if first_mode == "fixed_time" and first_anchor_jst is not None:
+        if mode == "fixed":
+            dt_jst = first_anchor_jst
+        else:
+            # by_index: idx0*interval
+            dt_jst = first_anchor_jst + timedelta(minutes=interval * idx0)
+        dt_utc = dt_jst.astimezone(UTC)
+        return to_rfc3339_utc(dt_utc), to_jst_human(dt_jst)
+
+    # 従来：今から start_delay (+ idx*interval)
+    start_delay = int(CFG["START_DELAY_MIN"])
     offset = start_delay
     if mode == "by_index":
         offset = start_delay + (interval * idx0)
@@ -658,6 +793,7 @@ def compute_publish_time(base_now_jst: datetime, idx0: int) -> Tuple[str, str]:
 # =============================================================================
 def main() -> int:
     ap = argparse.ArgumentParser()
+
     # 便利：CLI指定があればCFGを上書き（普段はCFGだけ編集でOK）
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--start_delay_min", type=int, default=None)
@@ -665,6 +801,32 @@ def main() -> int:
     ap.add_argument("--sleep_between_sec", type=float, default=None)
     ap.add_argument("--force_reschedule", action="store_true")
     ap.add_argument("--no_schedule", action="store_true")
+
+    # ★追加：1本目固定時刻の上書き
+    ap.add_argument(
+        "--first_publish_time_jst",
+        type=str,
+        default=None,
+        help="1本目の固定時刻 'HH:MM' (JST)",
+    )
+    ap.add_argument(
+        "--first_schedule_mode",
+        type=str,
+        default=None,
+        choices=["fixed_time", "delay"],
+        help="1本目の方式",
+    )
+    ap.add_argument(
+        "--first_time_buffer_min",
+        type=int,
+        default=None,
+        help="固定時刻が近すぎる場合のバッファ分",
+    )
+
+    # thumbnail controls
+    ap.add_argument("--no_thumbnail", action="store_true")
+    ap.add_argument("--thumbnail_strict", action="store_true")
+
     args = ap.parse_args()
 
     if args.limit is not None:
@@ -679,6 +841,18 @@ def main() -> int:
         CFG["FORCE_RESCHEDULE"] = True
     if args.no_schedule:
         CFG["SCHEDULE_ENABLED"] = False
+
+    if args.first_publish_time_jst is not None:
+        CFG["FIRST_PUBLISH_TIME_JST"] = str(args.first_publish_time_jst)
+    if args.first_schedule_mode is not None:
+        CFG["FIRST_SCHEDULE_MODE"] = str(args.first_schedule_mode)
+    if args.first_time_buffer_min is not None:
+        CFG["FIRST_TIME_BUFFER_MIN"] = int(args.first_time_buffer_min)
+
+    if args.no_thumbnail:
+        CFG["THUMBNAIL_ENABLED"] = False
+    if args.thumbnail_strict:
+        CFG["THUMBNAIL_STRICT"] = True
 
     db_path = Path(CFG["DB_PATH"])
     table_name = str(CFG["TABLE_NAME"])
@@ -698,12 +872,18 @@ def main() -> int:
     print(f"[CONF] TOKEN  : {token_file}")
     print(f"[CONF] LIMIT  : {CFG['LIMIT']}")
     print(f"[CONF] SCHEDULE_ENABLED : {CFG['SCHEDULE_ENABLED']}")
+    print(f"[CONF] FIRST_SCHEDULE_MODE : {CFG.get('FIRST_SCHEDULE_MODE')}")
+    print(f"[CONF] FIRST_PUBLISH_TIME_JST : {CFG.get('FIRST_PUBLISH_TIME_JST')}")
+    print(f"[CONF] FIRST_TIME_BUFFER_MIN : {CFG.get('FIRST_TIME_BUFFER_MIN')}")
     print(f"[CONF] START_DELAY_MIN  : {CFG['START_DELAY_MIN']}")
     print(f"[CONF] INTERVAL_MIN     : {CFG['INTERVAL_MIN']}")
     print(f"[CONF] OFFSET_MODE      : {CFG['OFFSET_MODE']}")
     print(f"[CONF] FORCE_RESCHEDULE : {CFG['FORCE_RESCHEDULE']}")
     print(f"[CONF] RESCHEDULE_IF_PAST: {CFG['RESCHEDULE_IF_PAST']}")
     print(f"[CONF] SLEEP_BETWEEN_SEC: {CFG['SLEEP_BETWEEN_SEC']}")
+    print(f"[CONF] THUMBNAIL_ENABLED: {CFG['THUMBNAIL_ENABLED']}")
+    print(f"[CONF] THUMBNAIL_REL_PATH: {CFG['THUMBNAIL_REL_PATH']}")
+    print(f"[CONF] THUMBNAIL_STRICT : {CFG['THUMBNAIL_STRICT']}")
     print("========================================================================")
 
     con = connect_db(db_path)
@@ -720,12 +900,28 @@ def main() -> int:
 
         if not queue:
             log(
-                "[INFO] queue is empty. (check_create=5 & video_created=1 & video_uploaded=0)"
+                "[INFO] queue is empty. (check_create=READY_STAGE & video_created=1 & video_uploaded=0)"
             )
             return 0
 
         base_now = now_jst()
         now_utc = datetime.now(UTC)
+
+        # ★追加：1本目固定時刻のアンカー（必要時のみ）
+        first_anchor_jst: Optional[datetime] = None
+        if (
+            CFG["SCHEDULE_ENABLED"]
+            and str(CFG.get("FIRST_SCHEDULE_MODE", "delay")).strip().lower()
+            == "fixed_time"
+        ):
+            try:
+                first_anchor_jst = compute_first_fixed_time(base_now)
+                log(f"[FIRST] fixed_time anchor_jst={to_jst_human(first_anchor_jst)}")
+            except Exception as fe:
+                eprint(
+                    f"[WARN] first fixed_time compute failed -> fallback to delay mode: {type(fe).__name__}: {fe}"
+                )
+                first_anchor_jst = None
 
         ok = 0
         ng = 0
@@ -735,10 +931,10 @@ def main() -> int:
             log(f"[ITEM] {i + 1}/{len(queue)} id={job.id} folder={job.folder_name}")
 
             try:
-                # ロック（5->6）
+                # ロック（READY->UPLOADING）
                 set_yt_status(con, table_name, job.id, "step:lock_start")
-                lock_job_5_to_6(con, table_name, job.id)
-                set_yt_status(con, table_name, job.id, "step:locked_to_6")
+                lock_job_ready_to_uploading(con, table_name, job.id)
+                set_yt_status(con, table_name, job.id, "step:locked_to_uploading")
 
                 # publishAt 決定
                 publish_at_utc = job.publish_at_utc.strip()
@@ -753,18 +949,18 @@ def main() -> int:
                     elif CFG["RESCHEDULE_IF_PAST"] and is_rfc3339_past(
                         publish_at_utc, now_utc
                     ):
-                        # 過去なら未来に再設定
                         need_set = True
 
                     if need_set:
-                        pub_utc, pub_jst = compute_publish_time(base_now, i)
+                        pub_utc, pub_jst = compute_publish_time(
+                            base_now, i, first_anchor_jst
+                        )
 
                         # 最低未来バッファ（安全策）
                         min_future = now_jst() + timedelta(
                             minutes=int(CFG["MIN_FUTURE_BUFFER_MIN"])
                         )
                         min_utc = to_rfc3339_utc(min_future.astimezone(UTC))
-                        # pub_utcがmin_utcより前なら、min_future側に寄せる
                         try:
                             dt_pub = datetime.strptime(
                                 pub_utc, "%Y-%m-%dT%H:%M:%SZ"
@@ -820,7 +1016,7 @@ def main() -> int:
                         else tags_line
                     )
 
-                # 予約公開なら privacy=private が必須
+                # 予約公開なら privacy=private が必須（運用が常にprivateなら固定でOK）
                 privacy = (
                     "private"
                     if (CFG["SCHEDULE_ENABLED"] and publish_at_utc)
@@ -851,6 +1047,43 @@ def main() -> int:
                     on_progress=on_prog,
                 )
 
+                # -------------------------
+                # サムネ設定（固定相対パス：image/preview/preview.png）
+                # -------------------------
+                if CFG["THUMBNAIL_ENABLED"]:
+                    set_thumb_status(con, table_name, job.id, "searching")
+                    thumb = find_thumbnail_file(parent_dir)
+                    if thumb:
+                        log(f"[THUMB] found: {thumb}")
+                        set_thumb_status(con, table_name, job.id, "found", str(thumb))
+                        try:
+                            set_thumbnail(yt, video_id, thumb)
+                            log("[THUMB] set OK")
+                            set_thumb_status(con, table_name, job.id, "set", str(thumb))
+                        except Exception as te:
+                            tb2 = traceback.format_exc()
+                            eprint(f"[THUMB] set FAILED: {type(te).__name__}: {te}")
+                            set_thumb_status(
+                                con, table_name, job.id, "failed", str(thumb), tb2
+                            )
+                            if CFG["THUMBNAIL_STRICT"]:
+                                raise RuntimeError(
+                                    f"thumbnail set failed (strict): {te}"
+                                )
+                    else:
+                        expect = parent_dir / str(CFG["THUMBNAIL_REL_PATH"])
+                        msg = f"thumbnail not found: {expect}"
+                        log(f"[THUMB] not found (skip) -> {expect}")
+                        set_thumb_status(
+                            con, table_name, job.id, "not_found", str(expect), msg
+                        )
+                        if CFG["THUMBNAIL_STRICT"]:
+                            raise RuntimeError("thumbnail not found (strict)")
+                else:
+                    log("[THUMB] disabled")
+                    set_thumb_status(con, table_name, job.id, "disabled")
+
+                # done
                 mark_done(con, table_name, job.id, video_id)
                 log(
                     f"[OK] uploaded id={job.id} videoId={video_id} publish_at_jst={publish_at_jst}"

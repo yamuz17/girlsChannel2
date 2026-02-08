@@ -4,6 +4,7 @@
 from __future__ import annotations
 import re
 import time
+import sys
 from pathlib import Path
 from typing import Dict, Any, List, Tuple
 import sqlite3
@@ -14,6 +15,12 @@ from dataclasses import dataclass
 from tqdm import tqdm
 from dateutil import parser as dtparser
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeoutError
+
+# Allow running from scripts_done/ directly.
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 from config import CFG
 
 # =========================================================

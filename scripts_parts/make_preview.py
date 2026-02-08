@@ -8,8 +8,14 @@ import shutil
 import subprocess
 from pathlib import Path
 from typing import Tuple, List
+import sys
 
 from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageOps
+
+# Allow running from scripts_parts/ directly.
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 import queue_db
 
@@ -91,7 +97,13 @@ META_JSON_REL = "text/meta.json"
 NDJSON_SEARCH_DIR_REL = "text"
 
 # イントロ音源
-START_DIR = Path((queue_db._env_str("START_DIR", "") or "").strip()).expanduser()
+_start_dir_raw = (queue_db._env_str("START_DIR", "") or "").strip()
+if _start_dir_raw:
+    START_DIR = Path(_start_dir_raw).expanduser()
+else:
+    # デフォルトは BASE_OUTPUT_ROOT/intro
+    START_DIR = BASE_OUTPUT_ROOT / "intro"
+
 START_MP3_NAME = (queue_db._env_str("START_MP3_NAME", "") or "").strip()
 
 # intro movie settings
@@ -514,25 +526,28 @@ def main() -> int:
             preview_png = build_preview_png(parent_dir)
             print(f"[OK] preview.png created: {preview_png}")
 
-            # 2) preview.mp4
-            if not START_DIR.exists():
-                raise FileNotFoundError(f"START_DIR not found: {START_DIR}")
-
-            mp3_path = pick_latest_mp3(START_DIR, START_MP3_NAME)
+            # 2) preview.mp4（イントロ音源が無ければスキップ）
             out_mp4 = preview_png.parent / OUT_MP4_NAME
             ffmpeg_log = parent_dir / LOG_DIR_REL / FFMPEG_LOG_NAME
 
-            print(f"[INFO] mp3    = {mp3_path}")
-            print(f"[INFO] outmp4 = {out_mp4}")
-            print(f"[INFO] sec    = {INTRO_SEC}")
-            make_preview_mp4(
-                preview_png=preview_png,
-                mp3_path=mp3_path,
-                out_mp4=out_mp4,
-                ffmpeg_log=ffmpeg_log,
-            )
-            print(f"[OK] preview.mp4 created: {out_mp4}")
-            print(f"[INFO] ffmpeg log: {ffmpeg_log}")
+            if not START_DIR.exists():
+                print(f"[WARN] START_DIR not found: {START_DIR} -> skip preview.mp4")
+            else:
+                try:
+                    mp3_path = pick_latest_mp3(START_DIR, START_MP3_NAME)
+                    print(f"[INFO] mp3    = {mp3_path}")
+                    print(f"[INFO] outmp4 = {out_mp4}")
+                    print(f"[INFO] sec    = {INTRO_SEC}")
+                    make_preview_mp4(
+                        preview_png=preview_png,
+                        mp3_path=mp3_path,
+                        out_mp4=out_mp4,
+                        ffmpeg_log=ffmpeg_log,
+                    )
+                    print(f"[OK] preview.mp4 created: {out_mp4}")
+                    print(f"[INFO] ffmpeg log: {ffmpeg_log}")
+                except FileNotFoundError as e:
+                    print(f"[WARN] {e} -> skip preview.mp4")
 
             queue_db.mark_done(con, CFG.table, item_id, STA_05, END_05)
             print(f"[OK] done. check_create {STA_05} -> {END_05} (id={item_id})")

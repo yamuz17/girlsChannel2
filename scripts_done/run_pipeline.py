@@ -7,10 +7,16 @@ import sqlite3
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Tuple
 from zoneinfo import ZoneInfo
+
+# Allow running from scripts_done/ directly.
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from config import CFG
 
@@ -35,21 +41,23 @@ PICK_QUEUE_INDEX_NAME = CFG.PICK_QUEUE_INDEX_NAME or "idx_items_pick_queue"
 PICK_QUEUE_INDEX_SQL = f"{TABLE_NAME}(check_create, id DESC)"  # 壊しにくい最小構成
 
 # --- scripts（運用：env）---
-SCRIPTS_DIR = CFG.SCRIPTS_DIR or Path(__file__).resolve().parent
+SCRIPTS_DONE_DIR = Path(__file__).resolve().parent
+SCRIPTS_PARTS_DIR = REPO_ROOT / "scripts_parts"
+SCRIPTS_DIR = CFG.SCRIPTS_DIR or REPO_ROOT
 
-SCRIPT_LIST = SCRIPTS_DIR / (CFG.SCRIPT_LIST_NAME or "build_list.py")
-SCRIPT_02 = SCRIPTS_DIR / (CFG.SCRIPT_02_NAME or "fetch_data.py")
-SCRIPT_03 = SCRIPTS_DIR / (CFG.SCRIPT_03_NAME or "make_images.py")
-SCRIPT_04 = SCRIPTS_DIR / (CFG.SCRIPT_04_NAME or "make_audio.py")
+SCRIPT_LIST = SCRIPTS_DONE_DIR / (CFG.SCRIPT_LIST_NAME or "build_list.py")
+SCRIPT_02 = SCRIPTS_PARTS_DIR / (CFG.SCRIPT_02_NAME or "fetch_data.py")
+SCRIPT_03 = SCRIPTS_PARTS_DIR / (CFG.SCRIPT_03_NAME or "make_images.py")
+SCRIPT_04 = SCRIPTS_PARTS_DIR / (CFG.SCRIPT_04_NAME or "make_audio.py")
 
 # 05 は「サムネ/preview」スクリプト想定
-SCRIPT_05 = SCRIPTS_DIR / (CFG.SCRIPT_05_NAME or "make_preview.py")
+SCRIPT_05 = SCRIPTS_PARTS_DIR / (CFG.SCRIPT_05_NAME or "make_preview.py")
 
 # 99 は「パーツ組み立て」想定
-SCRIPT_99 = SCRIPTS_DIR / (CFG.SCRIPT_99_NAME or "assemble_video.py")
+SCRIPT_99 = SCRIPTS_PARTS_DIR / (CFG.SCRIPT_99_NAME or "assemble_video.py")
 
-# 投稿予約
-SCRIPT_SCHEDULE = SCRIPTS_DIR / (CFG.SCRIPT_SCHEDULE_NAME or "投稿予約.py")
+# 投稿（予約/アップロード）
+SCRIPT_SCHEDULE = SCRIPTS_PARTS_DIR / (CFG.SCRIPT_SCHEDULE_NAME or "post_upload.py")
 
 # --- launcher behavior（運用：env）---
 RUNS_DEFAULT = CFG.RUNS_DEFAULT
@@ -61,9 +69,9 @@ SLEEP_SEC_WHEN_EMPTY = float(CFG.SLEEP_SEC_WHEN_EMPTY)
 PASS_FOLDER_NAME_TO_05 = CFG.PASS_FOLDER_NAME_TO_05
 
 # 実行制御（CLIで指定）
-# RUN_STEPS_RAW = "list,pipeline,schedule"
-RUN_STEPS_RAW = "list"
-RUN_PIPELINE_UNTIL = "99"
+RUN_STEPS_RAW = "list,pipeline,schedule"
+#RUN_STEPS_RAW = "list"
+RUN_PIPELINE_UNTIL = "1"
 
 # --- STA/END（運用：env）---
 STA_02 = CFG.STA_02
@@ -131,6 +139,99 @@ def connect(db_path: Path) -> sqlite3.Connection:
     if SQLITE_SYNCHRONOUS:
         con.execute(f"PRAGMA synchronous={SQLITE_SYNCHRONOUS};")
     return con
+
+
+def ensure_history_table(con: sqlite3.Connection) -> None:
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS historyRun (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          started_at TEXT NOT NULL,
+          ended_at TEXT NOT NULL,
+          duration_sec REAL NOT NULL,
+          steps TEXT NOT NULL,
+          runs INTEGER NOT NULL,
+          until_tag TEXT NOT NULL,
+          list_added INTEGER NOT NULL DEFAULT 0,
+          pipeline_ok INTEGER NOT NULL DEFAULT 0,
+          pipeline_err INTEGER NOT NULL DEFAULT 0,
+          schedule_ok INTEGER NOT NULL DEFAULT 0,
+          db_path TEXT NOT NULL,
+          base_output_root TEXT NOT NULL,
+          last_error TEXT
+        )
+        """
+    )
+    con.commit()
+
+
+def count_items(con: sqlite3.Connection) -> int:
+    row = con.execute(f"SELECT COUNT(*) AS n FROM {TABLE_NAME}").fetchone()
+    return int(row["n"]) if row else 0
+
+
+def count_video_created(con: sqlite3.Connection) -> int:
+    row = con.execute(
+        f"SELECT COUNT(*) AS n FROM {TABLE_NAME} WHERE video_created = 1"
+    ).fetchone()
+    return int(row["n"]) if row else 0
+
+
+def count_video_uploaded(con: sqlite3.Connection) -> int:
+    row = con.execute(
+        f"SELECT COUNT(*) AS n FROM {TABLE_NAME} WHERE video_uploaded = 1"
+    ).fetchone()
+    return int(row["n"]) if row else 0
+
+
+@dataclass
+class HistoryRun:
+    started_at: str
+    ended_at: str = ""
+    duration_sec: float = 0.0
+    steps: str = ""
+    runs: int = 0
+    until_tag: str = ""
+    list_added: int = 0
+    pipeline_ok: int = 0
+    pipeline_err: int = 0
+    schedule_ok: int = 0
+    last_error: str = ""
+
+
+def record_history(db_path: Path, h: HistoryRun) -> None:
+    if not db_path.exists():
+        return
+    try:
+        with connect(db_path) as con:
+            ensure_history_table(con)
+            con.execute(
+                """
+                INSERT INTO historyRun (
+                  started_at, ended_at, duration_sec, steps, runs, until_tag,
+                  list_added, pipeline_ok, pipeline_err, schedule_ok,
+                  db_path, base_output_root, last_error
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    h.started_at,
+                    h.ended_at,
+                    float(h.duration_sec),
+                    h.steps,
+                    int(h.runs),
+                    h.until_tag,
+                    int(h.list_added),
+                    int(h.pipeline_ok),
+                    int(h.pipeline_err),
+                    int(h.schedule_ok),
+                    str(DB_PATH),
+                    str(CFG.BASE_OUTPUT_ROOT),
+                    h.last_error or None,
+                ),
+            )
+            con.commit()
+    except Exception:
+        pass
 
 
 def ensure_columns(con: sqlite3.Connection) -> None:
@@ -414,7 +515,7 @@ def process_one_item(con: sqlite3.Connection) -> int:
 
     # ---- 02 ----
     if st == STA_02 and _stage_enabled("02"):
-        step_line(1, total_steps, "02_データ取得.py START")
+        step_line(1, total_steps, "データ取得 START")
         try:
             guard_unique_stage(con, STA_02)
             require_stage(con, item_id, expected=STA_02, label="before 02")
@@ -439,7 +540,7 @@ def process_one_item(con: sqlite3.Connection) -> int:
 
     # ---- 03 ----
     if st == STA_03 and _stage_enabled("03"):
-        step_line(2, total_steps, "03_画像生成.py START")
+        step_line(2, total_steps, "画像生成 START")
         try:
             guard_unique_stage(con, STA_03)
             require_stage(con, item_id, expected=STA_03, label="before 03")
@@ -458,7 +559,7 @@ def process_one_item(con: sqlite3.Connection) -> int:
 
     # ---- 04 ----
     if st == STA_04 and _stage_enabled("04"):
-        step_line(3, total_steps, "04_音声生成.py START")
+        step_line(3, total_steps, "音声生成 START")
         try:
             guard_unique_stage(con, STA_04)
             require_stage(con, item_id, expected=STA_04, label="before 04")
@@ -477,7 +578,7 @@ def process_one_item(con: sqlite3.Connection) -> int:
 
     # ---- 05 ----
     if st == STA_05 and _stage_enabled("05"):
-        step_line(4, total_steps, "make_preview START")
+        step_line(4, total_steps, "プレビュー生成 START")
         try:
             guard_unique_stage(con, STA_05)
             folder_name = require_stage(
@@ -504,7 +605,7 @@ def process_one_item(con: sqlite3.Connection) -> int:
 
     # ---- 99 ----
     if st == STA_99 and _stage_enabled("99"):
-        step_line(5, total_steps, "99_パーツ組み立て.py START")
+        step_line(5, total_steps, "動画組み立て START")
         try:
             guard_unique_stage(con, STA_99)
             require_stage(con, item_id, expected=STA_99, label="before 99")
@@ -549,7 +650,10 @@ def main() -> int:
         print(f"[ERROR] DB not found: {DB_PATH}", file=sys.stderr)
         return 2
 
-    banner(f"LAUNCHER START  {now_jst_str()}  runs={args.runs}")
+    start_ts = now_jst_str()
+    t0 = time.time()
+
+    banner(f"LAUNCHER START  {start_ts}  runs={args.runs}")
     print(f"[CONF] env              : {CFG.ENV_PATH}")
     print(f"[CONF] DB_PATH          : {DB_PATH}")
     print(f"[CONF] TABLE_NAME       : {TABLE_NAME}")
@@ -597,44 +701,92 @@ def main() -> int:
         if not p.exists():
             print(f"[WARN] script not found at startup: {p}", file=sys.stderr)
 
+    hist = HistoryRun(
+        started_at=start_ts,
+        steps=",".join(steps),
+        runs=int(args.runs),
+        until_tag=str(limit_tag),
+    )
+
     ok_count = 0
     err_count = 0
-    # list
-    if "list" in steps:
-        step_line(0, 3, "build_list START")
-        run_script_realtime(SCRIPT_LIST, TIMEOUT_LIST)
-
-    # pipeline
-    if "pipeline" in steps:
-        global PIPELINE_LIMIT_TAG, PIPELINE_LIMIT_IDX
-        PIPELINE_LIMIT_TAG = _pipeline_limit_tag(args.until)
-        PIPELINE_LIMIT_IDX = PIPELINE_STAGE_ORDER.index(PIPELINE_LIMIT_TAG)
-
+    schedule_ok = 0
+    created_before = 0
+    uploaded_before = 0
+    created_after = 0
+    uploaded_after = 0
+    try:
         with connect(DB_PATH) as con:
             ensure_columns(con)
+            created_before = count_video_created(con)
+            uploaded_before = count_video_uploaded(con)
 
-            for i in range(args.runs):
-                print(f"\n[LOOP] {i + 1}/{args.runs}")
-                rc = process_one_item(con)
+        # list
+        if "list" in steps:
+            step_line(0, 3, "build_list START")
+            with connect(DB_PATH) as con:
+                ensure_columns(con)
+                before = count_items(con)
+            run_script_realtime(SCRIPT_LIST, TIMEOUT_LIST)
+            with connect(DB_PATH) as con:
+                ensure_columns(con)
+                after = count_items(con)
+            hist.list_added = max(0, int(after - before))
 
-                if rc == 0:
-                    ok_count += 1
-                else:
-                    err_count += 1
-                    if STOP_ON_ERROR:
-                        print("[INFO] STOP_ON_ERROR=True -> stop.")
-                        break
+        # pipeline
+        if "pipeline" in steps:
+            global PIPELINE_LIMIT_TAG, PIPELINE_LIMIT_IDX
+            PIPELINE_LIMIT_TAG = _pipeline_limit_tag(args.until)
+            PIPELINE_LIMIT_IDX = PIPELINE_STAGE_ORDER.index(PIPELINE_LIMIT_TAG)
 
-                if SLEEP_SEC_WHEN_EMPTY > 0:
-                    time.sleep(SLEEP_SEC_WHEN_EMPTY)
+            with connect(DB_PATH) as con:
+                ensure_columns(con)
 
-    # schedule
-    if "schedule" in steps:
-        step_line(0, 3, "schedule START")
-        run_script_realtime(SCRIPT_SCHEDULE, TIMEOUT_SCHEDULE)
+                for i in range(args.runs):
+                    print(f"\n[LOOP] {i + 1}/{args.runs}")
+                    rc = process_one_item(con)
 
-    banner(f"LAUNCHER END  {now_jst_str()}  ok={ok_count} err={err_count}")
-    return 0 if err_count == 0 else 1
+                    if rc == 0:
+                        ok_count += 1
+                    else:
+                        err_count += 1
+                        if STOP_ON_ERROR:
+                            print("[INFO] STOP_ON_ERROR=True -> stop.")
+                            break
+
+                    if SLEEP_SEC_WHEN_EMPTY > 0:
+                        time.sleep(SLEEP_SEC_WHEN_EMPTY)
+
+        # schedule
+        if "schedule" in steps:
+            step_line(0, 3, "schedule START")
+            run_script_realtime(SCRIPT_SCHEDULE, TIMEOUT_SCHEDULE)
+            schedule_ok = 1
+
+        return 0 if err_count == 0 else 1
+    except Exception as e:
+        hist.last_error = f"{type(e).__name__}: {e}"
+        raise
+    finally:
+        try:
+            with connect(DB_PATH) as con:
+                ensure_columns(con)
+                created_after = count_video_created(con)
+                uploaded_after = count_video_uploaded(con)
+        except Exception:
+            pass
+
+        hist.pipeline_ok = int(ok_count)
+        hist.pipeline_err = int(err_count)
+        hist.schedule_ok = int(schedule_ok)
+        hist.ended_at = now_jst_str()
+        hist.duration_sec = float(time.time() - t0)
+        record_history(DB_PATH, hist)
+        created_delta = max(0, int(created_after - created_before))
+        uploaded_delta = max(0, int(uploaded_after - uploaded_before))
+        banner(
+            f"LAUNCHER END  {hist.ended_at}  created={created_delta} uploaded={uploaded_delta}"
+        )
 
 
 if __name__ == "__main__":

@@ -15,6 +15,10 @@ from typing import List, Tuple, Dict, Optional
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 import env_loader
 from config import CFG
 
@@ -100,7 +104,7 @@ PREVIEW_REL = Path(
     env_loader.env_str("PREVIEW_REL", "image/preview/preview.mp4")
     or "image/preview/preview.mp4"
 )
-PREVIEW_REQUIRED = env_loader.env_bool("PREVIEW_REQUIRED", True)
+PREVIEW_REQUIRED = env_loader.env_bool("PREVIEW_REQUIRED", False)
 
 # Ending（最後に付ける締め）
 ENABLE_ENDING = env_loader.env_bool("ENABLE_ENDING", True)

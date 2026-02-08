@@ -46,7 +46,15 @@ def _parse_env_file(path: Path) -> Dict[str, str]:
 
 
 def _default_values() -> Dict[str, str]:
-    base = Path.home() / "Documents" / "pythonOutput"
+    base = (
+        Path.home()
+        / "Library"
+        / "CloudStorage"
+        / "GoogleDrive-yuma17.service@gmail.com"
+        / "マイドライブ"
+        / "python"
+        / "output"
+    )
     return {
         "DB_PATH": str(base / "list_category_gossip.db"),
         "BASE_OUTPUT_ROOT": str(base),
@@ -91,10 +99,15 @@ def load_env(
     """
     if path is None:
         caller = _guess_caller_file()
-        # 1つ上の階層の env を優先
-        candidate = caller.resolve().parent.parent / filename
-        # 無ければローカルDocuments/readOnly/{filename}
-        env_path = candidate if candidate.exists() else _common_env_path(filename)
+        env_path = None
+        # 呼び出し元から親へ辿って最初に見つかった env を使う
+        for parent in caller.resolve().parents:
+            candidate = parent / filename
+            if candidate.exists():
+                env_path = candidate
+                break
+        if env_path is None:
+            env_path = _common_env_path(filename)
     else:
         p = Path(path).expanduser()
         env_path = p if p.is_file() else (p / filename)

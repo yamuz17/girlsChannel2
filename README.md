@@ -11,8 +11,9 @@ SQLite のキューで自動実行するスクリプト群です。
 ## 実行方法（例）
 ```bash
 source .venv/bin/activate
-python build_list.py
-python run_pipeline.py --steps list,pipeline --runs 1 --until 99
+python scripts_done/build_list.py
+python scripts_done/run_pipeline.py --steps list,pipeline --runs 1 --until 99
+python scripts_parts/post_upload.py --limit 1
 ```
 
 ## 注意

@@ -35,11 +35,18 @@ from typing import Dict, List, Optional, Tuple
 from urllib.parse import urljoin
 from zoneinfo import ZoneInfo
 
+import sys
+
 from PIL import Image
 from playwright.async_api import (
     async_playwright,
     TimeoutError as PlaywrightTimeoutError,
 )
+
+# Allow running from scripts_parts/ directly.
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 import env_loader
 from config import CFG
