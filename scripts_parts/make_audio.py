@@ -33,12 +33,17 @@ CFG = queue_db.build_queue_config_from_env()
 BASE_OUTPUT_ROOT = Path(queue_db._env_str("BASE_OUTPUT_ROOT", "")).expanduser()
 
 PICK_ORDER = (
-    queue_db._env_str("PICK_ORDER", "post_date_desc").strip() or "post_date_desc"
+    queue_db._env_str("PICK_ORDER", "hot_score_desc").strip() or "hot_score_desc"
 )
 STA_04 = queue_db._env_int("STA_04", 3)
 END_04 = queue_db._env_int("END_04", 4)
 
 ENGINE_URL = queue_db._env_str("ENGINE_URL", "http://127.0.0.1:50021").strip()
+# Guard against common typo: "http:/127.0.0.1:50021"
+if ENGINE_URL.startswith("http:/") and not ENGINE_URL.startswith("http://"):
+    ENGINE_URL = ENGINE_URL.replace("http:/", "http://", 1)
+if ENGINE_URL.startswith("https:/") and not ENGINE_URL.startswith("https://"):
+    ENGINE_URL = ENGINE_URL.replace("https:/", "https://", 1)
 
 VOICE_APP_CANDIDATES = [
     p.strip()
@@ -417,7 +422,7 @@ def main() -> int:
 
             picked = queue_db.pick_one(con, CFG.table, STA_04, PICK_ORDER)
             if picked is None:
-                print(f"[INFO] no item with check_create={STA_04}.")
+                print(f"[INFO] no item with stage={STA_04}.")
                 return 0
 
             item_id, folder_name = picked
@@ -434,14 +439,14 @@ def main() -> int:
                 run_voice_job(parent_dir)
 
                 queue_db.mark_done(con, CFG.table, item_id, STA_04, END_04)
-                print(f"[OK] done. check_create {STA_04} -> {END_04} (id={item_id})")
+                print(f"[OK] done. stage {STA_04} -> {END_04} (id={item_id})")
                 return 0
 
             except Exception as e:
                 err = f"{type(e).__name__}: {e}"
                 queue_db.mark_fail(con, CFG.table, item_id, STA_04, err)
                 print(
-                    f"[ERROR] failed id={item_id} kept check_create={STA_04}. {err}",
+                    f"[ERROR] failed id={item_id} kept stage={STA_04}. {err}",
                     file=sys.stderr,
                 )
                 return 1

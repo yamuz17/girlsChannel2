@@ -2,9 +2,9 @@
 # -*- coding: utf-8 -*-
 
 """
-Build List (single-table schema) for scripts_done.
-- one table only
-- hotness metric (comment velocity per day)
+Build List (single-table schema) for script_test.
+- one table only (no queue/topics split)
+- hotness metrics (comment velocity) using first_post_at
 - categories configurable via env JSON/CSV
 """
 
@@ -24,7 +24,7 @@ from tqdm import tqdm
 from dateutil import parser as dtparser
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeoutError
 
-# Allow running from scripts_done/ directly.
+# Allow running from script_test/ directly.
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
@@ -35,11 +35,13 @@ from env_loader import env_str
 # =========================================================
 # 設定（ここだけ変えればOK）
 # =========================================================
-DB_PATH = CFG.DB_PATH
+_default_db = Path(str(CFG.DB_PATH))
+_test_db = _default_db.with_name(_default_db.stem + "Test" + _default_db.suffix)
+DB_PATH = Path(env_str("DB_PATH_TEST", "") or str(_test_db))
 if not DB_PATH:
-    raise SystemExit("DB_PATH が未設定です（girlsChannel.env を確認）")
+    raise SystemExit("DB_PATH_TEST/DB_PATH が未設定です（girlsChannel.env を確認）")
 
-TABLE_NAME = env_str("TABLE_NAME", "items") or "items"
+TABLE_NAME = env_str("TABLE_NAME_TEST", "items_test") or "items_test"
 
 PAGE_FROM = int(env_str("PAGE_FROM", "1"))
 PAGE_TO = int(env_str("PAGE_TO", "15"))
@@ -184,6 +186,7 @@ def _parse_categories() -> List[CategoryConfig]:
             part = part.strip()
             if not part:
                 continue
+            # name|base_url|params
             pieces = [p.strip() for p in part.split("|")]
             if len(pieces) < 2:
                 continue
@@ -194,6 +197,7 @@ def _parse_categories() -> List[CategoryConfig]:
         if out:
             return out
 
+    # defaults
     return [
         CategoryConfig(
             name="ゴシップ",
@@ -431,6 +435,7 @@ def main() -> int:
     if not CATEGORIES:
         raise SystemExit("CATEGORIES が空です")
 
+    t0 = time.time()
     con = connect(DB_PATH)
 
     saved = 0

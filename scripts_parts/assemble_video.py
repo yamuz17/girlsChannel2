@@ -46,7 +46,7 @@ def env_float(name: str, default: float) -> float:
 
 
 def now_jst() -> str:
-    return datetime.now(ZoneInfo("Asia/Tokyo")).strftime("%Y-%m-%d %H:%M:%S")
+    return datetime.now(ZoneInfo("Asia/Tokyo")).strftime("%Y/%m/%d-%H:%M:%S")
 
 
 # =========================================================
@@ -83,7 +83,7 @@ END_99 = CFG.END_99
 PICK_ORDER_99 = (env_loader.env_str("PICK_ORDER_99", "") or "").strip()
 if not PICK_ORDER_99:
     PICK_ORDER_99 = (
-        env_loader.env_str("PICK_ORDER", "post_date_desc") or "post_date_desc"
+        env_loader.env_str("PICK_ORDER", "hot_score_desc") or "hot_score_desc"
     ).strip()
 
 # --- 99（動画組み立て）固有 ---
@@ -176,14 +176,12 @@ def ensure_columns(con: sqlite3.Connection) -> None:
     }
 
     need = {
-        "check_create": "INTEGER NOT NULL DEFAULT 0",
+        "skip": "INTEGER NOT NULL DEFAULT 0",
+        "stage": "INTEGER NOT NULL DEFAULT 0",
         "folder_name": "TEXT",
-        "last_error": "TEXT",
-        "updated_at": "TEXT",
-        "video_created": "INTEGER NOT NULL DEFAULT 0",
         "video_created_at": "TEXT",
-        "video_uploaded": "INTEGER NOT NULL DEFAULT 0",
-        "video_uploaded_at": "TEXT",
+        "upload_youtube_at": "TEXT",
+        "upload_tiktok_at": "TEXT",
     }
 
     for name, ddl in need.items():
@@ -198,21 +196,24 @@ def pick_one(con: sqlite3.Connection) -> Optional[sqlite3.Row]:
     # folder_name 必須（99は素材フォルダ前提）
     order_sql = "id DESC"
     if PICK_ORDER_99 == "post_date_desc":
-        order_sql = "post_date DESC, id DESC"
+        order_sql = "last_post_at DESC, id DESC"
     elif PICK_ORDER_99 == "comments_desc":
         cols_lower = {
             str(r[1]).lower()
             for r in con.execute(f"PRAGMA table_info({TABLE_NAME})").fetchall()
         }
         if "comments_count" in cols_lower:
-            order_sql = "comments_count DESC, id DESC"
+            order_sql = "comments_count DESC, last_post_at DESC, id DESC"
         else:
             order_sql = "id DESC"
+    elif PICK_ORDER_99 == "hot_score_desc":
+        order_sql = "hot_score_d DESC, last_post_at DESC, id DESC"
 
     sql = f"""
         SELECT *
           FROM {TABLE_NAME}
-         WHERE check_create = ?
+         WHERE stage = ?
+           AND COALESCE(skip,0)=0
            AND folder_name IS NOT NULL
            AND folder_name != ''
          ORDER BY {order_sql}
@@ -224,7 +225,7 @@ def pick_one(con: sqlite3.Connection) -> Optional[sqlite3.Row]:
 def claim_job_atomic(con: sqlite3.Connection, item_id: int) -> bool:
     """
     99単体を複数プロセスで起動しても二重処理しにくくするための軽い「取り込み」。
-    ステージ値は変えず、updated_at をBEGIN IMMEDIATEで更新して rowcount を見る。
+    ステージ値は変えず、BEGIN IMMEDIATE + no-op UPDATE で rowcount を見る。
     """
     for attempt in range(1, LOCK_RETRY_MAX + 1):
         try:
@@ -232,11 +233,11 @@ def claim_job_atomic(con: sqlite3.Connection, item_id: int) -> bool:
             cur = con.execute(
                 f"""
                 UPDATE {TABLE_NAME}
-                   SET updated_at = ?
+                   SET stage = stage
                  WHERE id = ?
-                   AND check_create = ?
+                   AND stage = ?
                 """,
-                (now_jst(), int(item_id), int(STA_99)),
+                (int(item_id), int(STA_99)),
             )
             con.execute("COMMIT;")
             return cur.rowcount == 1
@@ -262,20 +263,17 @@ def update_stage_success(con: sqlite3.Connection, item_id: int) -> None:
             cur = con.execute(
                 f"""
                 UPDATE {TABLE_NAME}
-                   SET check_create     = ?,
-                       last_error       = NULL,
-                       updated_at       = ?,
-                       video_created    = 1,
+                   SET stage            = ?,
                        video_created_at = ?
                  WHERE id = ?
-                   AND check_create = ?
+                   AND stage = ?
                 """,
-                (int(END_99), now_jst(), now_jst(), int(item_id), int(STA_99)),
+                (int(END_99), now_jst(), int(item_id), int(STA_99)),
             )
             con.execute("COMMIT;")
             if cur.rowcount == 0:
                 raise RuntimeError(
-                    f"update_success rowcount=0: id={item_id} check_createがSTA_99({STA_99})ではない可能性"
+                    f"update_success rowcount=0: id={item_id} stageがSTA_99({STA_99})ではない可能性"
                 )
             return
         except sqlite3.OperationalError as e:
@@ -300,11 +298,11 @@ def update_stage_error(con: sqlite3.Connection, item_id: int, err: str) -> None:
             con.execute(
                 f"""
                 UPDATE {TABLE_NAME}
-                   SET last_error = ?,
-                       updated_at = ?
+                   SET stage = stage
                  WHERE id = ?
+                   AND stage = ?
                 """,
-                (err[:2000], now_jst(), int(item_id)),
+                (int(item_id), int(STA_99)),
             )
             con.execute("COMMIT;")
             return
@@ -1114,7 +1112,7 @@ def run_build(parent_dir: Path, item_id: int) -> Path:
 
 
 # =========================
-# メイン（DBキューで1件拾って処理→check_create更新）
+# メイン（DBキューで1件拾って処理→stage更新）
 # =========================
 def main() -> int:
     print(f"[INFO] now={now_jst()}")
@@ -1139,7 +1137,7 @@ def main() -> int:
 
         row = pick_one(con)
         if row is None:
-            print(f"[INFO] no item with check_create={STA_99}.")
+            print(f"[INFO] no item with stage={STA_99}.")
             return 0
 
         item_id = int(row["id"])
@@ -1162,14 +1160,14 @@ def main() -> int:
             print(f"[OK] created: {out_mp4}")
 
             update_stage_success(con, item_id=item_id)
-            print(f"[OK] done. check_create {STA_99} -> {END_99} (id={item_id})")
+            print(f"[OK] done. stage {STA_99} -> {END_99} (id={item_id})")
             return 0
 
         except Exception as e:
             err = f"{type(e).__name__}: {e}"
             update_stage_error(con, item_id=item_id, err=err)
             print(
-                f"[ERROR] failed id={item_id} kept check_create={STA_99}. {err}",
+                f"[ERROR] failed id={item_id} kept stage={STA_99}. {err}",
                 file=sys.stderr,
             )
             return 1

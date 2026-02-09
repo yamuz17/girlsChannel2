@@ -84,13 +84,22 @@ def check_db(db_path: Path, failures: List[str]) -> None:
             """
             CREATE TABLE IF NOT EXISTS items (
               id TEXT PRIMARY KEY,
-              check_create INTEGER NOT NULL DEFAULT 0,
-              check_date TEXT NOT NULL,
-              post_date TEXT NOT NULL,
-              comments_count INTEGER NOT NULL,
-              category TEXT NOT NULL,
-              title TEXT NOT NULL,
-              post_title TEXT
+              skip INTEGER NOT NULL DEFAULT 0,
+              stage INTEGER NOT NULL DEFAULT 0,
+              category TEXT,
+              title TEXT,
+              post_title TEXT,
+              keywords TEXT,
+              first_post_at TEXT,
+              last_post_at TEXT,
+              comments_count INTEGER,
+              url TEXT,
+              folder_name TEXT,
+              hot_score_d REAL,
+              list_add_at TEXT,
+              video_created_at TEXT,
+              upload_youtube_at TEXT,
+              upload_tiktok_at TEXT
             );
             """
         )

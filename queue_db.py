@@ -97,7 +97,7 @@ def _env_required_path(name: str) -> Path:
 
 
 def now_jst() -> str:
-    return datetime.now(ZoneInfo("Asia/Tokyo")).strftime("%Y-%m-%d %H:%M:%S")
+    return datetime.now(ZoneInfo("Asia/Tokyo")).strftime("%Y/%m/%d-%H:%M:%S")
 
 
 # =========================
@@ -169,25 +169,33 @@ def ensure_common_columns(con: sqlite3.Connection, table: str) -> None:
         except Exception:
             pass
 
-    # キュー制御
-    if "check_create" not in cols:
-        add(f"ALTER TABLE {table} ADD COLUMN check_create INTEGER DEFAULT 0")
+    # 単一テーブル仕様（必要列のみ追加）
+    if "skip" not in cols:
+        add(f"ALTER TABLE {table} ADD COLUMN skip INTEGER NOT NULL DEFAULT 0")
+    if "stage" not in cols:
+        add(f"ALTER TABLE {table} ADD COLUMN stage INTEGER NOT NULL DEFAULT 0")
     if "folder_name" not in cols:
         add(f"ALTER TABLE {table} ADD COLUMN folder_name TEXT")
-    if "last_error" not in cols:
-        add(f"ALTER TABLE {table} ADD COLUMN last_error TEXT")
-    if "updated_at" not in cols:
-        add(f"ALTER TABLE {table} ADD COLUMN updated_at TEXT")
-
-    # 進捗フラグ（既存スクリプト群と統一）
-    if "video_created" not in cols:
-        add(f"ALTER TABLE {table} ADD COLUMN video_created INTEGER DEFAULT 0")
+    if "keywords" not in cols:
+        add(f"ALTER TABLE {table} ADD COLUMN keywords TEXT")
+    if "first_post_at" not in cols:
+        add(f"ALTER TABLE {table} ADD COLUMN first_post_at TEXT")
+    if "last_post_at" not in cols:
+        add(f"ALTER TABLE {table} ADD COLUMN last_post_at TEXT")
+    if "comments_count" not in cols:
+        add(f"ALTER TABLE {table} ADD COLUMN comments_count INTEGER")
+    if "url" not in cols:
+        add(f"ALTER TABLE {table} ADD COLUMN url TEXT")
+    if "hot_score_d" not in cols:
+        add(f"ALTER TABLE {table} ADD COLUMN hot_score_d REAL")
+    if "list_add_at" not in cols:
+        add(f"ALTER TABLE {table} ADD COLUMN list_add_at TEXT")
     if "video_created_at" not in cols:
         add(f"ALTER TABLE {table} ADD COLUMN video_created_at TEXT")
-    if "video_uploaded" not in cols:
-        add(f"ALTER TABLE {table} ADD COLUMN video_uploaded INTEGER DEFAULT 0")
-    if "video_uploaded_at" not in cols:
-        add(f"ALTER TABLE {table} ADD COLUMN video_uploaded_at TEXT")
+    if "upload_youtube_at" not in cols:
+        add(f"ALTER TABLE {table} ADD COLUMN upload_youtube_at TEXT")
+    if "upload_tiktok_at" not in cols:
+        add(f"ALTER TABLE {table} ADD COLUMN upload_tiktok_at TEXT")
 
     con.commit()
 
@@ -201,8 +209,11 @@ def ensure_pick_queue_index(con: sqlite3.Connection, cfg: QueueConfig) -> None:
         return
 
     # SQL自体は壊れやすいので “コード側” で生成（あなたの方針に合わせる）
-    # check_create で絞って、次に comments_count を使うケースが多い
-    sql = f"CREATE INDEX IF NOT EXISTS {cfg.pick_queue_index_name} ON {cfg.table}(check_create, comments_count DESC, post_date ASC)"
+    # 単一テーブル仕様: stage で絞って hot_score_d / last_post_at で並べる想定
+    sql = (
+        f"CREATE INDEX IF NOT EXISTS {cfg.pick_queue_index_name} "
+        f"ON {cfg.table}(stage, hot_score_d DESC, last_post_at DESC, id DESC)"
+    )
     try:
         con.execute(sql)
         con.commit()
@@ -215,19 +226,22 @@ def pick_one(
     con: sqlite3.Connection, table: str, sta: int, pick_order: str
 ) -> Optional[Tuple[int, str]]:
     """
-    check_create==sta を1件拾う。返り値: (id, folder_name)
+    stage==sta を1件拾う。返り値: (id, folder_name)
     """
     order_sql = "id DESC"
     if pick_order == "post_date_desc":
-        order_sql = "post_date DESC, id DESC"
+        order_sql = "last_post_at DESC, id DESC"
     elif pick_order == "comments_desc":
-        order_sql = "comments_count DESC, post_date DESC, id DESC"
+        order_sql = "comments_count DESC, last_post_at DESC, id DESC"
+    elif pick_order == "hot_score_desc":
+        order_sql = "hot_score_d DESC, last_post_at DESC, id DESC"
 
     row = con.execute(
         f"""
         SELECT id, folder_name
           FROM {table}
-         WHERE check_create = ?
+         WHERE stage = ?
+           AND COALESCE(skip,0)=0
            AND folder_name IS NOT NULL
            AND folder_name != ''
          ORDER BY {order_sql}
@@ -250,13 +264,11 @@ def mark_done(
     cur = con.execute(
         f"""
         UPDATE {table}
-           SET check_create = ?,
-               last_error   = NULL,
-               updated_at   = ?
+           SET stage = ?
          WHERE id = ?
-           AND check_create = ?
+           AND stage = ?
         """,
-        (int(end_value), now_jst(), int(item_id), int(sta_expected)),
+        (int(end_value), int(item_id), int(sta_expected)),
     )
     con.commit()
 
@@ -270,17 +282,15 @@ def mark_fail(
     con: sqlite3.Connection, table: str, item_id: int, sta_value: int, err: str
 ) -> None:
     """
-    失敗：STA据え置き + last_error
+    失敗：STA据え置き
     """
     con.execute(
         f"""
         UPDATE {table}
-           SET check_create = ?,
-               last_error   = ?,
-               updated_at   = ?
+           SET stage = ?
          WHERE id = ?
         """,
-        (int(sta_value), str(err)[:2000], now_jst(), int(item_id)),
+        (int(sta_value), int(item_id)),
     )
     con.commit()
 
@@ -289,11 +299,9 @@ def mark_video_created(con: sqlite3.Connection, table: str, item_id: int) -> Non
     con.execute(
         f"""
         UPDATE {table}
-           SET video_created    = 1,
-               video_created_at = ?,
-               updated_at       = ?
+           SET video_created_at = ?
          WHERE id = ?
         """,
-        (now_jst(), now_jst(), int(item_id)),
+        (now_jst(), int(item_id)),
     )
     con.commit()

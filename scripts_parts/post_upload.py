@@ -56,10 +56,10 @@ CFG = {
     "CLIENT_JSON_NAME": CFG.CLIENT_JSON_NAME,
     "TOKEN_NAME": CFG.TOKEN_NAME,
     # --- pipeline statuses ---
-    "READY_STAGE": 6,
-    "UPLOADING_STAGE": 7,
-    "DONE_STAGE": 8,
-    "FAIL_BACK_STAGE": 6,
+    "READY_STAGE": 60,
+    "UPLOADING_STAGE": 70,
+    "DONE_STAGE": 80,
+    "FAIL_BACK_STAGE": 60,
     # --- video file ---
     "MOVIE_SUBDIR": "movie",
     "VIDEO_GLOB": "*.mp4",
@@ -121,7 +121,7 @@ def now_jst() -> datetime:
 
 
 def now_jst_str() -> str:
-    return now_jst().strftime("%Y-%m-%d %H:%M:%S")
+    return now_jst().strftime("%Y/%m/%d-%H:%M:%S")
 
 
 def log(msg: str) -> None:
@@ -173,10 +173,10 @@ def normalize_tags(tags: List[str]) -> List[str]:
     return capped
 
 
-def parse_keywords_raw_to_tags(keywords_raw: Optional[str]) -> List[str]:
-    if not keywords_raw:
+def parse_keywords_to_tags(keywords: Optional[str]) -> List[str]:
+    if not keywords:
         return []
-    s = str(keywords_raw).strip()
+    s = str(keywords).strip()
     if not s:
         return []
 
@@ -279,12 +279,13 @@ def ensure_columns(con: sqlite3.Connection, table_name: str) -> None:
 
     must = {
         "id",
-        "check_create",
+        "stage",
+        "skip",
         "folder_name",
         "post_title",
-        "keywords_raw",
-        "video_created",
-        "video_uploaded",
+        "keywords",
+        "video_created_at",
+        "upload_youtube_at",
     }
     missing = sorted(list(must - cols))
     if missing:
@@ -302,6 +303,7 @@ def ensure_columns(con: sqlite3.Connection, table_name: str) -> None:
         ("published_at_utc", "TEXT"),
         ("video_created_at", "TEXT"),
         ("video_uploaded_at", "TEXT"),
+        ("upload_youtube_at", "TEXT"),
         # サムネ系
         ("youtube_thumbnail_path", "TEXT"),
         ("youtube_thumbnail_set_at", "TEXT"),
@@ -377,10 +379,10 @@ class JobRow:
     id: str
     folder_name: str
     post_title: str
-    keywords_raw: Optional[str]
-    check_create: int
-    video_created: int
-    video_uploaded: int
+    keywords: Optional[str]
+    stage: int
+    video_created_at: str
+    upload_youtube_at: str
     publish_at_utc: str
     publish_at_jst: str
 
@@ -393,16 +395,17 @@ def fetch_upload_queue(
         SELECT id,
                COALESCE(folder_name,'') AS folder_name,
                COALESCE(post_title,'')  AS post_title,
-               keywords_raw,
-               check_create,
-               COALESCE(video_created,0) AS video_created,
-               COALESCE(video_uploaded,0) AS video_uploaded,
+               keywords,
+               stage,
+               COALESCE(video_created_at,'') AS video_created_at,
+               COALESCE(upload_youtube_at,'') AS upload_youtube_at,
                COALESCE(publish_at_utc,'') AS publish_at_utc,
                COALESCE(publish_at_jst,'') AS publish_at_jst
           FROM {table_name}
-         WHERE check_create = ?
-           AND COALESCE(video_created,0) = 1
-           AND COALESCE(video_uploaded,0) = 0
+         WHERE stage = ?
+           AND COALESCE(skip,0)=0
+           AND COALESCE(video_created_at,'') != ''
+           AND COALESCE(upload_youtube_at,'') = ''
            AND COALESCE(folder_name,'') != ''
          ORDER BY CAST(id AS INTEGER) ASC
          LIMIT ?
@@ -417,12 +420,10 @@ def fetch_upload_queue(
                 id=str(r["id"]),
                 folder_name=str(r["folder_name"]),
                 post_title=str(r["post_title"]),
-                keywords_raw=None
-                if r["keywords_raw"] is None
-                else str(r["keywords_raw"]),
-                check_create=int(r["check_create"]),
-                video_created=int(r["video_created"]),
-                video_uploaded=int(r["video_uploaded"]),
+                keywords=None if r["keywords"] is None else str(r["keywords"]),
+                stage=int(r["stage"]),
+                video_created_at=str(r["video_created_at"]),
+                upload_youtube_at=str(r["upload_youtube_at"]),
                 publish_at_utc=str(r["publish_at_utc"]),
                 publish_at_jst=str(r["publish_at_jst"]),
             )
@@ -435,31 +436,31 @@ def lock_job_ready_to_uploading(
 ) -> None:
     con.execute("BEGIN IMMEDIATE;")
     row = con.execute(
-        f"SELECT check_create, COALESCE(video_uploaded,0) AS video_uploaded FROM {table_name} WHERE id=?",
+        f"SELECT stage, COALESCE(upload_youtube_at,'') AS upload_youtube_at FROM {table_name} WHERE id=?",
         (job_id,),
     ).fetchone()
     if not row:
         con.execute("ROLLBACK;")
         raise RuntimeError(f"id not found: id={job_id}")
 
-    st = int(row["check_create"])
-    vu = int(row["video_uploaded"])
-    if vu == 1:
+    st = int(row["stage"])
+    uploaded_at = str(row["upload_youtube_at"] or "")
+    if uploaded_at:
         con.execute("ROLLBACK;")
         raise RuntimeError(f"already uploaded: id={job_id}")
     if st != CFG["READY_STAGE"]:
         con.execute("ROLLBACK;")
         raise RuntimeError(
-            f"expected check_create={CFG['READY_STAGE']} but got {st}: id={job_id}"
+            f"expected stage={CFG['READY_STAGE']} but got {st}: id={job_id}"
         )
 
     cur = con.execute(
         f"""
         UPDATE {table_name}
-           SET check_create=?,
+           SET stage=?,
                youtube_status=?,
                youtube_error=?
-         WHERE id=? AND check_create=? AND COALESCE(video_uploaded,0)=0
+         WHERE id=? AND stage=? AND COALESCE(upload_youtube_at,'')=''
         """,
         (CFG["UPLOADING_STAGE"], "lock_to_uploading", None, job_id, CFG["READY_STAGE"]),
     )
@@ -495,9 +496,8 @@ def mark_done(
     con.execute(
         f"""
         UPDATE {table_name}
-           SET check_create=?,
-               video_uploaded=1,
-               video_uploaded_at=?,
+           SET stage=?,
+               upload_youtube_at=?,
                youtube_video_id=?,
                youtube_uploaded_at=?,
                youtube_status=?,
@@ -523,7 +523,7 @@ def mark_fail_back(
     con.execute(
         f"""
         UPDATE {table_name}
-           SET check_create=?,
+           SET stage=?,
                youtube_status=?,
                youtube_error=?
          WHERE id=?
@@ -900,7 +900,7 @@ def main() -> int:
 
         if not queue:
             log(
-                "[INFO] queue is empty. (check_create=READY_STAGE & video_created=1 & video_uploaded=0)"
+                "[INFO] queue is empty. (stage=READY_STAGE & video_created_at!=NULL & upload_youtube_at=NULL)"
             )
             return 0
 
@@ -1005,7 +1005,7 @@ def main() -> int:
 
                 # メタ
                 title = clean_title(job.post_title) or clean_title(video_path.stem)
-                tags = parse_keywords_raw_to_tags(job.keywords_raw)
+                tags = parse_keywords_to_tags(job.keywords)
 
                 description = (CFG["DESCRIPTION_COMMON"] or "").strip()
                 if tags:

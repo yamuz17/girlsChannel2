@@ -4,8 +4,8 @@
 """
 03_画像生成.py（DBキュー方式 / env運用 / STA-END方式）
 
-- check_create=STA_03 のレコードを1件取得
-- 成功したら check_create を END_03 に更新
+- stage=STA_03 のレコードを1件取得
+- 成功したら stage を END_03 に更新
 - DB/SQLite設定は .env から取得
 """
 
@@ -40,7 +40,7 @@ CFG = queue_db.build_queue_config_from_env()
 BASE_OUTPUT_ROOT = Path(queue_db._env_str("BASE_OUTPUT_ROOT", "")).expanduser()
 
 PICK_ORDER = (
-    queue_db._env_str("PICK_ORDER", "post_date_desc").strip() or "post_date_desc"
+    queue_db._env_str("PICK_ORDER", "hot_score_desc").strip() or "hot_score_desc"
 )
 
 STA_03 = queue_db._env_int("STA_03", 2)
@@ -692,7 +692,7 @@ def main() -> int:
 
         picked = queue_db.pick_one(con, CFG.table, STA_03, PICK_ORDER)
         if not picked:
-            print(f"[INFO] no item with check_create={STA_03}.")
+            print(f"[INFO] no item with stage={STA_03}.")
             return 0
 
         item_id, folder_name = picked
@@ -724,13 +724,13 @@ def main() -> int:
             print(f"  COMMENT: {out_comment_dir} ({created} files)")
 
             queue_db.mark_done(con, CFG.table, item_id, STA_03, END_03)
-            print(f"[DB] check_create {STA_03} -> {END_03} (id={item_id})")
+            print(f"[DB] stage {STA_03} -> {END_03} (id={item_id})")
             return 0
 
         except Exception as e:
             err = f"{type(e).__name__}: {e}"
             queue_db.mark_fail(con, CFG.table, item_id, STA_03, err)
-            print(f"[ERROR] failed id={item_id} kept check_create={STA_03}. {err}")
+            print(f"[ERROR] failed id={item_id} kept stage={STA_03}. {err}")
             return 1
 
 

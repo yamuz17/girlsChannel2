@@ -38,7 +38,9 @@ PICK_NEW_ORDER_SQL = "post_date DESC, id DESC"
 # --- pick高速化インデックス（運用寄り：env）---
 ENABLE_PICK_QUEUE_INDEX = CFG.ENABLE_PICK_QUEUE_INDEX
 PICK_QUEUE_INDEX_NAME = CFG.PICK_QUEUE_INDEX_NAME or "idx_items_pick_queue"
-PICK_QUEUE_INDEX_SQL = f"{TABLE_NAME}(check_create, id DESC)"  # 壊しにくい最小構成
+PICK_QUEUE_INDEX_SQL = (
+    f"{TABLE_NAME}(stage, hot_score_d DESC, last_post_at DESC, id DESC)"
+)  # 壊しにくい最小構成
 
 # --- scripts（運用：env）---
 SCRIPTS_DONE_DIR = Path(__file__).resolve().parent
@@ -60,7 +62,8 @@ SCRIPT_99 = SCRIPTS_PARTS_DIR / (CFG.SCRIPT_99_NAME or "assemble_video.py")
 SCRIPT_SCHEDULE = SCRIPTS_PARTS_DIR / (CFG.SCRIPT_SCHEDULE_NAME or "post_upload.py")
 
 # --- launcher behavior（運用：env）---
-RUNS_DEFAULT = CFG.RUNS_DEFAULT
+# 実行回数（わかりやすく上部で定義）
+RUNS_PIPELINE = CFG.RUNS_DEFAULT
 STOP_ON_ERROR = CFG.STOP_ON_ERROR
 RESET_TO_ZERO_ON_FAIL_02 = CFG.RESET_TO_ZERO_ON_FAIL_02
 SLEEP_SEC_WHEN_EMPTY = float(CFG.SLEEP_SEC_WHEN_EMPTY)
@@ -69,9 +72,8 @@ SLEEP_SEC_WHEN_EMPTY = float(CFG.SLEEP_SEC_WHEN_EMPTY)
 PASS_FOLDER_NAME_TO_05 = CFG.PASS_FOLDER_NAME_TO_05
 
 # 実行制御（CLIで指定）
-RUN_STEPS_RAW = "list,pipeline,schedule"
-#RUN_STEPS_RAW = "list"
-RUN_PIPELINE_UNTIL = "1"
+RUN_STEPS_RAW = "pipeline"
+RUN_PIPELINE_UNTIL = "2"
 
 # --- STA/END（運用：env）---
 STA_02 = CFG.STA_02
@@ -107,7 +109,7 @@ SQLITE_SYNCHRONOUS = (CFG.SQLITE_SYNCHRONOUS or "NORMAL").strip()
 # 共通
 # =========================================================
 def now_jst_str() -> str:
-    return datetime.now(ZoneInfo("Asia/Tokyo")).strftime("%Y-%m-%d %H:%M:%S")
+    return datetime.now(ZoneInfo("Asia/Tokyo")).strftime("%Y/%m/%d-%H:%M:%S")
 
 
 def banner(msg: str) -> None:
@@ -172,14 +174,14 @@ def count_items(con: sqlite3.Connection) -> int:
 
 def count_video_created(con: sqlite3.Connection) -> int:
     row = con.execute(
-        f"SELECT COUNT(*) AS n FROM {TABLE_NAME} WHERE video_created = 1"
+        f"SELECT COUNT(*) AS n FROM {TABLE_NAME} WHERE video_created_at IS NOT NULL AND video_created_at != ''"
     ).fetchone()
     return int(row["n"]) if row else 0
 
 
 def count_video_uploaded(con: sqlite3.Connection) -> int:
     row = con.execute(
-        f"SELECT COUNT(*) AS n FROM {TABLE_NAME} WHERE video_uploaded = 1"
+        f"SELECT COUNT(*) AS n FROM {TABLE_NAME} WHERE upload_youtube_at IS NOT NULL AND upload_youtube_at != ''"
     ).fetchone()
     return int(row["n"]) if row else 0
 
@@ -244,23 +246,39 @@ def ensure_columns(con: sqlite3.Connection) -> None:
         except Exception:
             pass
 
-    if "check_create" not in cols:
-        add_col(f"ALTER TABLE {TABLE_NAME} ADD COLUMN check_create INTEGER DEFAULT 0")
+    # single-table schema (add if missing)
+    if "skip" not in cols:
+        add_col(f"ALTER TABLE {TABLE_NAME} ADD COLUMN skip INTEGER NOT NULL DEFAULT 0")
+    if "stage" not in cols:
+        add_col(f"ALTER TABLE {TABLE_NAME} ADD COLUMN stage INTEGER NOT NULL DEFAULT 0")
+    if "category" not in cols:
+        add_col(f"ALTER TABLE {TABLE_NAME} ADD COLUMN category TEXT")
+    if "title" not in cols:
+        add_col(f"ALTER TABLE {TABLE_NAME} ADD COLUMN title TEXT")
+    if "post_title" not in cols:
+        add_col(f"ALTER TABLE {TABLE_NAME} ADD COLUMN post_title TEXT")
+    if "keywords" not in cols:
+        add_col(f"ALTER TABLE {TABLE_NAME} ADD COLUMN keywords TEXT")
+    if "first_post_at" not in cols:
+        add_col(f"ALTER TABLE {TABLE_NAME} ADD COLUMN first_post_at TEXT")
+    if "last_post_at" not in cols:
+        add_col(f"ALTER TABLE {TABLE_NAME} ADD COLUMN last_post_at TEXT")
+    if "comments_count" not in cols:
+        add_col(f"ALTER TABLE {TABLE_NAME} ADD COLUMN comments_count INTEGER")
+    if "url" not in cols:
+        add_col(f"ALTER TABLE {TABLE_NAME} ADD COLUMN url TEXT")
     if "folder_name" not in cols:
         add_col(f"ALTER TABLE {TABLE_NAME} ADD COLUMN folder_name TEXT")
-    if "last_error" not in cols:
-        add_col(f"ALTER TABLE {TABLE_NAME} ADD COLUMN last_error TEXT")
-    if "updated_at" not in cols:
-        add_col(f"ALTER TABLE {TABLE_NAME} ADD COLUMN updated_at TEXT")
-
-    if "video_created" not in cols:
-        add_col(f"ALTER TABLE {TABLE_NAME} ADD COLUMN video_created INTEGER DEFAULT 0")
+    if "hot_score_d" not in cols:
+        add_col(f"ALTER TABLE {TABLE_NAME} ADD COLUMN hot_score_d REAL")
+    if "list_add_at" not in cols:
+        add_col(f"ALTER TABLE {TABLE_NAME} ADD COLUMN list_add_at TEXT")
     if "video_created_at" not in cols:
         add_col(f"ALTER TABLE {TABLE_NAME} ADD COLUMN video_created_at TEXT")
-    if "video_uploaded" not in cols:
-        add_col(f"ALTER TABLE {TABLE_NAME} ADD COLUMN video_uploaded INTEGER DEFAULT 0")
-    if "video_uploaded_at" not in cols:
-        add_col(f"ALTER TABLE {TABLE_NAME} ADD COLUMN video_uploaded_at TEXT")
+    if "upload_youtube_at" not in cols:
+        add_col(f"ALTER TABLE {TABLE_NAME} ADD COLUMN upload_youtube_at TEXT")
+    if "upload_tiktok_at" not in cols:
+        add_col(f"ALTER TABLE {TABLE_NAME} ADD COLUMN upload_tiktok_at TEXT")
 
     if ENABLE_PICK_QUEUE_INDEX:
         try:
@@ -277,30 +295,27 @@ def update_item(
     con: sqlite3.Connection,
     item_id: int,
     *,
-    check_create: int,
-    last_error: Optional[str],
+    stage: int,
 ) -> None:
     con.execute(
         f"""
         UPDATE {TABLE_NAME}
-           SET check_create = ?,
-               last_error   = ?,
-               updated_at   = ?
+           SET stage = ?
          WHERE id = ?
         """,
-        (int(check_create), last_error, now_jst_str(), int(item_id)),
+        (int(stage), int(item_id)),
     )
     con.commit()
 
 
 def fetch_status(con: sqlite3.Connection, item_id: int) -> Tuple[int, str]:
     row = con.execute(
-        f"SELECT check_create, COALESCE(folder_name,'') AS folder_name FROM {TABLE_NAME} WHERE id = ?",
+        f"SELECT stage, COALESCE(folder_name,'') AS folder_name FROM {TABLE_NAME} WHERE id = ?",
         (int(item_id),),
     ).fetchone()
     if row is None:
         return (-999, "")
-    return (int(row["check_create"]), str(row["folder_name"]))
+    return (int(row["stage"]), str(row["folder_name"]))
 
 
 def require_stage(
@@ -308,11 +323,11 @@ def require_stage(
 ) -> str:
     st, folder = fetch_status(con, item_id)
     print(
-        f"[STATUS] {label}: check_create={st} folder_name={'(empty)' if not folder else folder}"
+        f"[STATUS] {label}: stage={st} folder_name={'(empty)' if not folder else folder}"
     )
     if st != int(expected):
         raise RuntimeError(
-            f"{label}: expected check_create={expected} but got {st} (id={item_id})"
+            f"{label}: expected stage={expected} but got {st} (id={item_id})"
         )
     return folder
 
@@ -359,7 +374,7 @@ def run_script_realtime(
 def _parse_steps(raw: str) -> List[str]:
     parts = [p.strip().lower() for p in (raw or "").split(",") if p.strip()]
     if not parts or "all" in parts:
-        return ["list", "pipeline", "schedule"]
+        return ["pipeline"]
     return parts
 
 
@@ -400,92 +415,37 @@ def guard_unique_stage(con: sqlite3.Connection, stage: int) -> None:
     stageが複数あると「別IDを拾う」事故が起きるので止める。
     各スクリプトは stage を見て自分で pick する前提なので必須ガード。
     """
-    rows = con.execute(
-        f"SELECT id FROM {TABLE_NAME} WHERE check_create=? ORDER BY id DESC LIMIT 50",
-        (int(stage),),
-    ).fetchall()
-    if len(rows) != 1:
-        ids = [str(r["id"]) for r in rows]
-        raise RuntimeError(
-            f"check_create={stage} が {len(rows)}件あります。"
-            f"この状態だと次工程が別IDを拾う可能性があるので停止します。 ids={','.join(ids)}"
-        )
+    return
 
 
 def pick_inprogress_job(con: sqlite3.Connection) -> Optional[sqlite3.Row]:
     """
-    途中（STA群）を優先して拾う。
-    数値の大小に依存しないよう、明示順（02→03→04→05→99）で並べる。
+    単一実行向け:
+    - video_created_at が空のものだけ対象
+    - stage が最も大きいものを優先
     """
-    stages = (STA_02, STA_03, STA_04, STA_05, STA_99)
-    q = ",".join(["?"] * len(stages))
-
-    order_case = f"""
-    CASE check_create
-      WHEN {int(STA_02)} THEN 1
-      WHEN {int(STA_03)} THEN 2
-      WHEN {int(STA_04)} THEN 3
-      WHEN {int(STA_05)} THEN 4
-      WHEN {int(STA_99)} THEN 5
-      ELSE 99
-    END
-    """
-
+    stages_all = (STA_02, STA_03, STA_04, STA_05, STA_99)
+    q = ",".join(["?"] * len(stages_all))
     return con.execute(
         f"""
         SELECT *
           FROM {TABLE_NAME}
-         WHERE check_create IN ({q})
-         ORDER BY {order_case} ASC, id DESC
+         WHERE stage IN ({q})
+           AND COALESCE(skip,0)=0
+           AND COALESCE(video_created_at,'') = ''
+         ORDER BY stage DESC,
+                  COALESCE(hot_score_d,0) DESC,
+                  last_post_at DESC,
+                  id DESC
          LIMIT 1
         """,
-        tuple(int(x) for x in stages),
+        tuple(int(x) for x in stages_all),
     ).fetchone()
 
 
 def lock_new_job_atomic(con: sqlite3.Connection) -> Optional[sqlite3.Row]:
-    """新規(0)を拾って、0→STA_02 を原子的に実行。"""
-    con.execute("BEGIN IMMEDIATE;")
-    try:
-        row = con.execute(
-            f"""
-            SELECT *
-              FROM {TABLE_NAME}
-             WHERE check_create = 0
-             ORDER BY {PICK_NEW_ORDER_SQL}
-             LIMIT 1
-            """
-        ).fetchone()
-
-        if not row:
-            con.execute("ROLLBACK;")
-            return None
-
-        item_id = int(row["id"])
-
-        con.execute(
-            f"""
-            UPDATE {TABLE_NAME}
-               SET check_create = ?,
-                   last_error   = NULL,
-                   updated_at   = ?
-             WHERE id = ? AND check_create = 0
-            """,
-            (int(STA_02), now_jst_str(), int(item_id)),
-        )
-
-        if con.total_changes == 0:
-            con.execute("ROLLBACK;")
-            return None
-
-        con.execute("COMMIT;")
-        return con.execute(
-            f"SELECT * FROM {TABLE_NAME} WHERE id=?", (int(item_id),)
-        ).fetchone()
-
-    except Exception:
-        con.execute("ROLLBACK;")
-        raise
+    """単一テーブル版では未使用（stageはbuild_listで付与）。"""
+    return None
 
 
 def process_one_item(con: sqlite3.Connection) -> int:
@@ -493,15 +453,12 @@ def process_one_item(con: sqlite3.Connection) -> int:
 
     row = pick_inprogress_job(con)
     if row is None:
-        row = lock_new_job_atomic(con)
-
-    if row is None:
-        print("[INFO] no item to process (no 0 and no STA stages).")
+        print("[INFO] no item to process (no STA stages).")
         return 0
 
     item_id = int(row["id"])
-    st = int(row["check_create"])
-    print(f"[INFO] picked id={item_id} (check_create={st})")
+    st = int(row["stage"])
+    print(f"[INFO] picked id={item_id} (stage={st})")
 
     total_steps = 5  # 02/03/04/05/99
 
@@ -530,12 +487,8 @@ def process_one_item(con: sqlite3.Connection) -> int:
         except Exception as e:
             err = f"02 failed: {type(e).__name__}: {e}"
             print(f"[ERROR] {err}", file=sys.stderr)
-            if RESET_TO_ZERO_ON_FAIL_02:
-                update_item(con, item_id, check_create=0, last_error=err)
-                print(f"[INFO] reset id={item_id} to check_create=0")
-            else:
-                update_item(con, item_id, check_create=STA_02, last_error=err)
-                print(f"[INFO] kept id={item_id} at check_create={STA_02}")
+            update_item(con, item_id, stage=STA_02)
+            print(f"[INFO] kept id={item_id} at stage={STA_02}")
             return 1
 
     # ---- 03 ----
@@ -553,8 +506,8 @@ def process_one_item(con: sqlite3.Connection) -> int:
         except Exception as e:
             err = f"03 failed: {type(e).__name__}: {e}"
             print(f"[ERROR] {err}", file=sys.stderr)
-            update_item(con, item_id, check_create=STA_03, last_error=err)
-            print(f"[INFO] kept id={item_id} at check_create={STA_03} (retry 03)")
+            update_item(con, item_id, stage=STA_03)
+            print(f"[INFO] kept id={item_id} at stage={STA_03} (retry 03)")
             return 1
 
     # ---- 04 ----
@@ -572,8 +525,8 @@ def process_one_item(con: sqlite3.Connection) -> int:
         except Exception as e:
             err = f"04 failed: {type(e).__name__}: {e}"
             print(f"[ERROR] {err}", file=sys.stderr)
-            update_item(con, item_id, check_create=STA_04, last_error=err)
-            print(f"[INFO] kept id={item_id} at check_create={STA_04} (retry 04)")
+            update_item(con, item_id, stage=STA_04)
+            print(f"[INFO] kept id={item_id} at stage={STA_04} (retry 04)")
             return 1
 
     # ---- 05 ----
@@ -599,8 +552,8 @@ def process_one_item(con: sqlite3.Connection) -> int:
         except Exception as e:
             err = f"05 failed: {type(e).__name__}: {e}"
             print(f"[ERROR] {err}", file=sys.stderr)
-            update_item(con, item_id, check_create=STA_05, last_error=err)
-            print(f"[INFO] kept id={item_id} at check_create={STA_05} (retry 05)")
+            update_item(con, item_id, stage=STA_05)
+            print(f"[INFO] kept id={item_id} at stage={STA_05} (retry 05)")
             return 1
 
     # ---- 99 ----
@@ -616,8 +569,8 @@ def process_one_item(con: sqlite3.Connection) -> int:
         except Exception as e:
             err = f"99 failed: {type(e).__name__}: {e}"
             print(f"[ERROR] {err}", file=sys.stderr)
-            update_item(con, item_id, check_create=STA_99, last_error=err)
-            print(f"[INFO] kept id={item_id} at check_create={STA_99} (retry 99)")
+            update_item(con, item_id, stage=STA_99)
+            print(f"[INFO] kept id={item_id} at stage={STA_99} (retry 99)")
             return 1
 
     print(f"[INFO] id={item_id} stage={st} is not a STA stage (skip).")
@@ -629,14 +582,14 @@ def main() -> int:
     ap.add_argument(
         "--runs",
         type=int,
-        default=RUNS_DEFAULT,
+        default=RUNS_PIPELINE,
         help="パイプラインを回す回数（RUNS_DEFAULTがデフォ）",
     )
     ap.add_argument(
         "--steps",
         type=str,
         default=RUN_STEPS_RAW,
-        help="実行ステップ（list,pipeline,schedule / all）",
+        help="実行ステップ（pipeline / all）",
     )
     ap.add_argument(
         "--until",
@@ -690,13 +643,11 @@ def main() -> int:
 
     # 事前に存在チェック（早期に気づける）
     for p in (
-        SCRIPT_LIST,
         SCRIPT_02,
         SCRIPT_03,
         SCRIPT_04,
         SCRIPT_05,
         SCRIPT_99,
-        SCRIPT_SCHEDULE,
     ):
         if not p.exists():
             print(f"[WARN] script not found at startup: {p}", file=sys.stderr)
@@ -710,7 +661,6 @@ def main() -> int:
 
     ok_count = 0
     err_count = 0
-    schedule_ok = 0
     created_before = 0
     uploaded_before = 0
     created_after = 0
@@ -720,18 +670,6 @@ def main() -> int:
             ensure_columns(con)
             created_before = count_video_created(con)
             uploaded_before = count_video_uploaded(con)
-
-        # list
-        if "list" in steps:
-            step_line(0, 3, "build_list START")
-            with connect(DB_PATH) as con:
-                ensure_columns(con)
-                before = count_items(con)
-            run_script_realtime(SCRIPT_LIST, TIMEOUT_LIST)
-            with connect(DB_PATH) as con:
-                ensure_columns(con)
-                after = count_items(con)
-            hist.list_added = max(0, int(after - before))
 
         # pipeline
         if "pipeline" in steps:
@@ -757,12 +695,6 @@ def main() -> int:
                     if SLEEP_SEC_WHEN_EMPTY > 0:
                         time.sleep(SLEEP_SEC_WHEN_EMPTY)
 
-        # schedule
-        if "schedule" in steps:
-            step_line(0, 3, "schedule START")
-            run_script_realtime(SCRIPT_SCHEDULE, TIMEOUT_SCHEDULE)
-            schedule_ok = 1
-
         return 0 if err_count == 0 else 1
     except Exception as e:
         hist.last_error = f"{type(e).__name__}: {e}"
@@ -778,7 +710,6 @@ def main() -> int:
 
         hist.pipeline_ok = int(ok_count)
         hist.pipeline_err = int(err_count)
-        hist.schedule_ok = int(schedule_ok)
         hist.ended_at = now_jst_str()
         hist.duration_sec = float(time.time() - t0)
         record_history(DB_PATH, hist)

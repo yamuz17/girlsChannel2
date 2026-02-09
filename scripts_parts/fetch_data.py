@@ -1,23 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-02_データ取得.py（DB連携版・keywords_raw保存対応 / env運用 / STA-END方式）
+02_データ取得.py（単一テーブル版 / env運用 / STA-END方式）
 
-- DB(items) の check_create=STA_02 を1件取得して TARGET_URL を自動決定
-- トピックページからタイトル/keywords_raw(meta keywords)/関連キーワード/メイン画像/コメントを取得して保存
+- DB(items) の stage=STA_02 を1件取得して TARGET_URL を自動決定
+- トピックページからタイトル/keywords(meta keywords)/関連キーワード/メイン画像/コメントを取得して保存
 - 保存フォルダ名： "{topic_id}_{yyyymmdd-hhmmss}_{タイトル先頭N文字}"
-- DBカラム folder_name と keywords_raw に保存
-  ★keywords_raw は「JSON配列文字列」で保存（例: ["きっかけ","ゴールイン",...])
-- 成功時 check_create を END_02 に更新（失敗時は STA_02 のまま + last_error）
-
-追加仕様（A案）:
-- ランキング選定時に NGワードを含むコメントは採用しない（ENABLE_EXCLUDE_BADWORDS）
-- 10件作れない場合は「投稿しない」扱いとして check_deploy を +1（check_createは通常通りENDへ）
-  → 投稿スクリプト側で COALESCE(check_deploy,0) >= 1 を除外すればOK
+- DBカラム folder_name と keywords に保存
+  ★keywords は「JSON配列文字列」で保存（例: ["きっかけ","ゴールイン",...])
+- 成功時 stage を END_02 に更新（失敗時は STA_02 のまま）
 
 注意：
 - 02は folder_name がまだ無いので、他スクリプトのように folder_name 条件でピックできない。
-  → check_create=STA_02 の id を直接拾う。
+  → stage=STA_02 の id を直接拾う。
 """
 
 from __future__ import annotations
@@ -124,7 +119,7 @@ if END_02 < 0:
 PICK_ORDER_02 = (env_loader.env_str("PICK_ORDER_02", "") or "").strip()
 if not PICK_ORDER_02:
     PICK_ORDER_02 = (
-        env_loader.env_str("PICK_ORDER", "post_date_desc") or "post_date_desc"
+        env_loader.env_str("PICK_ORDER", "hot_score_desc") or "hot_score_desc"
     ).strip()
 
 # --- 02固有：取得系 ---
@@ -279,12 +274,22 @@ def ensure_columns(con: sqlite3.Connection) -> None:
     }
 
     need = {
-        "check_create": "INTEGER NOT NULL DEFAULT 0",
-        "check_deploy": "INTEGER NOT NULL DEFAULT 0",
+        "skip": "INTEGER NOT NULL DEFAULT 0",
+        "stage": "INTEGER NOT NULL DEFAULT 0",
         "folder_name": "TEXT",
-        "keywords_raw": "TEXT",
-        "last_error": "TEXT",
-        "updated_at": "TEXT",
+        "keywords": "TEXT",
+        "first_post_at": "TEXT",
+        "last_post_at": "TEXT",
+        "list_add_at": "TEXT",
+        "category": "TEXT",
+        "title": "TEXT",
+        "post_title": "TEXT",
+        "comments_count": "INTEGER",
+        "url": "TEXT",
+        "hot_score_d": "REAL",
+        "video_created_at": "TEXT",
+        "upload_youtube_at": "TEXT",
+        "upload_tiktok_at": "TEXT",
     }
 
     for name, ddl in need.items():
@@ -299,13 +304,14 @@ def pick_one_stage_id(con: sqlite3.Connection, stage: int) -> Optional[str]:
     # 02は folder_name 未生成なので folder_name 条件は付けない
     order_sql = "id DESC"
     if PICK_ORDER_02 == "post_date_desc":
-        order_sql = "post_date DESC, id DESC"
+        order_sql = "last_post_at DESC, id DESC"
     elif PICK_ORDER_02 == "comments_desc":
-        # itemsに comment_count が無い場合あり得るので注意（あるなら使える）
-        order_sql = "comment_count DESC, post_date DESC, id DESC"
+        order_sql = "comments_count DESC, last_post_at DESC, id DESC"
+    elif PICK_ORDER_02 == "hot_score_desc":
+        order_sql = "hot_score_d DESC, last_post_at DESC, id DESC"
 
     row = con.execute(
-        f"SELECT id FROM {TABLE_NAME} WHERE check_create=? ORDER BY {order_sql} LIMIT 1",
+        f"SELECT id FROM {TABLE_NAME} WHERE stage=? AND COALESCE(skip,0)=0 ORDER BY {order_sql} LIMIT 1",
         (int(stage),),
     ).fetchone()
     return str(row["id"]) if row else None
@@ -320,18 +326,15 @@ def update_stage_success(
             cur = con.execute(
                 f"""
                 UPDATE {TABLE_NAME}
-                   SET check_create=?,
+                   SET stage=?,
                        folder_name=?,
-                       keywords_raw=?,
-                       last_error=NULL,
-                       updated_at=?
-                 WHERE id=? AND check_create=?
+                       keywords=?
+                 WHERE id=? AND stage=?
                 """,
                 (
                     int(END_02),
                     folder_name,
                     (keywords_raw or "").strip(),
-                    now_jst(),
                     tid,
                     int(STA_02),
                 ),
@@ -339,7 +342,7 @@ def update_stage_success(
             con.execute("COMMIT;")
             if cur.rowcount == 0:
                 raise RuntimeError(
-                    f"update_success rowcount=0: id={tid} check_createがSTA_02({STA_02})ではない可能性"
+                    f"update_success rowcount=0: id={tid} stageがSTA_02({STA_02})ではない可能性"
                 )
             return
         except sqlite3.OperationalError as e:
@@ -358,66 +361,13 @@ def update_stage_success(
 
 
 def update_stage_error(con: sqlite3.Connection, tid: str, err: str) -> None:
-    for attempt in range(1, LOCK_RETRY_MAX + 1):
-        try:
-            con.execute("BEGIN IMMEDIATE;")
-            con.execute(
-                f"""
-                UPDATE {TABLE_NAME}
-                   SET last_error=?,
-                       updated_at=?
-                 WHERE id=?
-                """,
-                (err[:2000], now_jst(), tid),
-            )
-            con.execute("COMMIT;")
-            return
-        except sqlite3.OperationalError as e:
-            try:
-                con.execute("ROLLBACK;")
-            except Exception:
-                pass
-            if "locked" in str(e).lower():
-                print(f"[LOCK] retry {attempt}/{LOCK_RETRY_MAX} on update_error")
-                time.sleep(LOCK_RETRY_SLEEP_SEC)
-                continue
-            raise
-    raise sqlite3.OperationalError(
-        "database is locked (retry exceeded) on update_error"
-    )
+    # 単一テーブル仕様では last_error カラムを持たないため、ログのみ出す
+    print(f"[ERROR] id={tid} {err}")
 
 
 def increment_check_deploy(con: sqlite3.Connection, tid: str, reason: str) -> None:
-    for attempt in range(1, LOCK_RETRY_MAX + 1):
-        try:
-            con.execute("BEGIN IMMEDIATE;")
-            con.execute(
-                f"""
-                UPDATE {TABLE_NAME}
-                   SET check_deploy = COALESCE(check_deploy,0) + 1,
-                       last_error   = ?,
-                       updated_at   = ?
-                 WHERE id=?
-                """,
-                (f"deploy_skip: {reason}"[:2000], now_jst(), tid),
-            )
-            con.execute("COMMIT;")
-            return
-        except sqlite3.OperationalError as e:
-            try:
-                con.execute("ROLLBACK;")
-            except Exception:
-                pass
-            if "locked" in str(e).lower():
-                print(
-                    f"[LOCK] retry {attempt}/{LOCK_RETRY_MAX} on increment_check_deploy"
-                )
-                time.sleep(LOCK_RETRY_SLEEP_SEC)
-                continue
-            raise
-    raise sqlite3.OperationalError(
-        "database is locked (retry exceeded) on increment_check_deploy"
-    )
+    # 単一テーブル仕様では check_deploy を持たない。必要なら skip を立てる運用にする。
+    print(f"[INFO] deploy_skip (not recorded): id={tid} reason={reason}")
 
 
 # ===================== 文字処理 =====================
@@ -1052,7 +1002,7 @@ def main() -> None:
 
         tid = pick_one_stage_id(con, STA_02)
         if not tid:
-            print(f"[INFO] check_create={STA_02} のIDがありません（終了）")
+            print(f"[INFO] stage={STA_02} のIDがありません（終了）")
             return
 
         target_url = f"https://girlschannel.net/topics/{tid}/"
@@ -1097,7 +1047,7 @@ def main() -> None:
             print(f"  text_dir={text_dir}")
             print(f"  image_dir={image_dir}")
             print(
-                f"  keywords_raw(json)={keywords_raw_json[:200] + ('...' if len(keywords_raw_json) > 200 else '') if keywords_raw_json else '(なし)'}"
+                f"  keywords(json)={keywords_raw_json[:200] + ('...' if len(keywords_raw_json) > 200 else '') if keywords_raw_json else '(なし)'}"
             )
             if ENABLE_RELATED_KEYWORDS:
                 print(

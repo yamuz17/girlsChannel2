@@ -42,7 +42,7 @@ else:
         raise SystemExit("[ENV] BASE_OUTPUT_ROOT is required (empty)")
 
 PICK_ORDER = (
-    queue_db._env_str("PICK_ORDER", "post_date_desc") or "post_date_desc"
+    queue_db._env_str("PICK_ORDER", "hot_score_desc") or "hot_score_desc"
 ).strip()
 
 STA_05 = int(queue_db._env_int("STA_05", 4))
@@ -101,8 +101,9 @@ _start_dir_raw = (queue_db._env_str("START_DIR", "") or "").strip()
 if _start_dir_raw:
     START_DIR = Path(_start_dir_raw).expanduser()
 else:
-    # デフォルトは BASE_OUTPUT_ROOT/intro
-    START_DIR = BASE_OUTPUT_ROOT / "intro"
+    # デフォルトは BASE_OUTPUT_ROOT/start があれば優先、無ければ intro
+    candidate = BASE_OUTPUT_ROOT / "start"
+    START_DIR = candidate if candidate.exists() else (BASE_OUTPUT_ROOT / "intro")
 
 START_MP3_NAME = (queue_db._env_str("START_MP3_NAME", "") or "").strip()
 
@@ -365,6 +366,11 @@ def pick_latest_mp3(start_dir: Path, fixed_name: str) -> Path:
         if not p.exists():
             raise FileNotFoundError(f"mp3 not found: {p}")
         return p
+    # よくある固定名を優先
+    for name in ("Start.mp3", "Start .mp3"):
+        p = start_dir / name
+        if p.exists():
+            return p
     mp3s = sorted(
         start_dir.glob("*.mp3"), key=lambda p: p.stat().st_mtime, reverse=True
     )
@@ -509,7 +515,7 @@ def main() -> int:
 
         picked = queue_db.pick_one(con, CFG.table, STA_05, PICK_ORDER)
         if picked is None:
-            print(f"[INFO] no item with check_create={STA_05}.")
+            print(f"[INFO] no item with stage={STA_05}.")
             return 0
 
         item_id, folder_name = picked
@@ -550,13 +556,13 @@ def main() -> int:
                     print(f"[WARN] {e} -> skip preview.mp4")
 
             queue_db.mark_done(con, CFG.table, item_id, STA_05, END_05)
-            print(f"[OK] done. check_create {STA_05} -> {END_05} (id={item_id})")
+            print(f"[OK] done. stage {STA_05} -> {END_05} (id={item_id})")
             return 0
 
         except Exception as e:
             err = f"{type(e).__name__}: {e}"
             queue_db.mark_fail(con, CFG.table, item_id, STA_05, err)
-            print(f"[ERROR] failed id={item_id} kept check_create={STA_05}. {err}")
+            print(f"[ERROR] failed id={item_id} kept stage={STA_05}. {err}")
             return 1
 
 
