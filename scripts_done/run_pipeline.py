@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
-import argparse
 import sqlite3
 import subprocess
 import sys
@@ -10,72 +9,55 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Optional
 from zoneinfo import ZoneInfo
+
+from tqdm import tqdm
 
 # Allow running from scripts_done/ directly.
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from config import CFG
+from core.config import CFG
+from core import env_loader
 
 # =========================================================
-# =========================================================
-# 設定（運用系は env、ロジック系はコード）
+# 設定値（このスクリプトで使う運用変数は上部に集約）
 # =========================================================
 
-# --- DB（運用：env）---
+# DBパス（必須）
 DB_PATH = CFG.DB_PATH
 if not DB_PATH:
     raise SystemExit("[ENV] missing required key: DB_PATH")
 
-TABLE_NAME = CFG.TABLE_NAME or "items"
+# 入力/進捗管理テーブル名
+ITEMS_DO_TABLE = CFG.ITEMS_DO_TABLE or "items_do"
+ITEMS_DONE_TABLE = CFG.ITEMS_DONE_TABLE or "items_done"
 
-# ★新規(0)の取得順（ロジック寄りなのでコードに残す）
-PICK_NEW_ORDER_SQL = "post_date DESC, id DESC"
-
-# --- pick高速化インデックス（運用寄り：env）---
-ENABLE_PICK_QUEUE_INDEX = CFG.ENABLE_PICK_QUEUE_INDEX
-PICK_QUEUE_INDEX_NAME = CFG.PICK_QUEUE_INDEX_NAME or "idx_items_pick_queue"
-PICK_QUEUE_INDEX_SQL = (
-    f"{TABLE_NAME}(stage, hot_score_d DESC, last_post_at DESC, id DESC)"
-)  # 壊しにくい最小構成
-
-# --- scripts（運用：env）---
+# スクリプト配置
 SCRIPTS_DONE_DIR = Path(__file__).resolve().parent
 SCRIPTS_PARTS_DIR = REPO_ROOT / "scripts_parts"
-SCRIPTS_DIR = CFG.SCRIPTS_DIR or REPO_ROOT
 
-SCRIPT_LIST = SCRIPTS_DONE_DIR / (CFG.SCRIPT_LIST_NAME or "build_list.py")
+# 各工程スクリプト
 SCRIPT_02 = SCRIPTS_PARTS_DIR / (CFG.SCRIPT_02_NAME or "fetch_data.py")
 SCRIPT_03 = SCRIPTS_PARTS_DIR / (CFG.SCRIPT_03_NAME or "make_images.py")
 SCRIPT_04 = SCRIPTS_PARTS_DIR / (CFG.SCRIPT_04_NAME or "make_audio.py")
-
-# 05 は「サムネ/preview」スクリプト想定
 SCRIPT_05 = SCRIPTS_PARTS_DIR / (CFG.SCRIPT_05_NAME or "make_preview.py")
-
-# 99 は「パーツ組み立て」想定
 SCRIPT_99 = SCRIPTS_PARTS_DIR / (CFG.SCRIPT_99_NAME or "assemble_video.py")
 
-# 投稿（予約/アップロード）
-SCRIPT_SCHEDULE = SCRIPTS_PARTS_DIR / (CFG.SCRIPT_SCHEDULE_NAME or "post_upload.py")
-
-# --- launcher behavior（運用：env）---
-# 実行回数（わかりやすく上部で定義）
+# 実行制御
 RUNS_PIPELINE = CFG.RUNS_DEFAULT
 STOP_ON_ERROR = CFG.STOP_ON_ERROR
-RESET_TO_ZERO_ON_FAIL_02 = CFG.RESET_TO_ZERO_ON_FAIL_02
 SLEEP_SEC_WHEN_EMPTY = float(CFG.SLEEP_SEC_WHEN_EMPTY)
-
-# 05に folder_name を渡す互換運用（旧05を残す場合用）
 PASS_FOLDER_NAME_TO_05 = CFG.PASS_FOLDER_NAME_TO_05
 
-# 実行制御（CLIで指定）
-RUN_STEPS_RAW = "pipeline"
-RUN_PIPELINE_UNTIL = "2"
+# env実行パラメータ（引数ではなく env で制御）
+RUN_STEPS_RAW = (env_loader.env_str("RUN_STEPS", "pipeline") or "pipeline").strip()
+PIPELINE_UNTIL_RAW = (env_loader.env_str("PIPELINE_UNTIL", "99") or "99").strip()
+MAX_PIPELINE_CYCLES = int(env_loader.env_int("MAX_PIPELINE_CYCLES", 0))
 
-# --- STA/END（運用：env）---
+# ステージ番号
 STA_02 = CFG.STA_02
 END_02 = CFG.END_02
 STA_03 = CFG.STA_03
@@ -87,49 +69,39 @@ END_05 = CFG.END_05
 STA_99 = CFG.STA_99
 END_99 = CFG.END_99
 
-# --- タイムアウト（秒） 互換吸収 ---
+# 各工程タイムアウト
 TIMEOUT_02 = CFG.TIMEOUT_02
 TIMEOUT_03 = CFG.TIMEOUT_03
 TIMEOUT_04 = CFG.TIMEOUT_04
 TIMEOUT_05 = CFG.TIMEOUT_05
 TIMEOUT_99 = CFG.TIMEOUT_99
-TIMEOUT_LIST = CFG.TIMEOUT_LIST
-TIMEOUT_SCHEDULE = CFG.TIMEOUT_SCHEDULE
 
-# --- sqlite pragmas（運用：env）---
+# SQLite設定
 BUSY_TIMEOUT_MS = CFG.BUSY_TIMEOUT_MS
-
-# 互換：SQLITE_WAL=true があるなら WAL 優先。無ければ SQLITE_JOURNAL_MODE を使う。
-SQLITE_WAL = CFG.SQLITE_WAL
-SQLITE_JOURNAL_MODE = (CFG.SQLITE_JOURNAL_MODE or ("WAL" if SQLITE_WAL else "")).strip()
+SQLITE_JOURNAL_MODE = (CFG.SQLITE_JOURNAL_MODE or "WAL").strip()
 SQLITE_SYNCHRONOUS = (CFG.SQLITE_SYNCHRONOUS or "NORMAL").strip()
 
+# ステージ実行順
+PIPELINE_STAGE_ORDER = ["02", "03", "04", "05", "99"]
+PIPELINE_LIMIT_TAG = "99"
+PIPELINE_LIMIT_IDX = PIPELINE_STAGE_ORDER.index(PIPELINE_LIMIT_TAG)
 
-# =========================================================
-# 共通
-# =========================================================
+
+@dataclass
+class HistoryRun:
+    steps: str
+    start_at: str
+    end_at: str = ""
+    sec: float = 0.0
+    error: str = ""
+
+
 def now_jst_str() -> str:
     return datetime.now(ZoneInfo("Asia/Tokyo")).strftime("%Y/%m/%d-%H:%M:%S")
 
 
-def banner(msg: str) -> None:
-    print("\n" + "=" * 72)
-    print(msg)
-    print("=" * 72)
-
-
-def step_line(n: int, total: int, title: str) -> None:
-    print("\n" + "-" * 72)
-    print(f"[STEP {n:02d}/{total:02d}] {title}")
-    print("-" * 72)
-
-
-def fmt_sec(sec: float) -> str:
-    if sec < 60:
-        return f"{sec:.1f}s"
-    m = int(sec // 60)
-    s = sec - (m * 60)
-    return f"{m}m{s:.0f}s"
+def now_folder_stamp() -> str:
+    return datetime.now(ZoneInfo("Asia/Tokyo")).strftime("%Y%m%d-%H%M%S")
 
 
 def connect(db_path: Path) -> sqlite3.Connection:
@@ -143,62 +115,165 @@ def connect(db_path: Path) -> sqlite3.Connection:
     return con
 
 
-def ensure_history_table(con: sqlite3.Connection) -> None:
+def ensure_tables(con: sqlite3.Connection) -> None:
     con.execute(
-        """
-        CREATE TABLE IF NOT EXISTS historyRun (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          started_at TEXT NOT NULL,
-          ended_at TEXT NOT NULL,
-          duration_sec REAL NOT NULL,
-          steps TEXT NOT NULL,
-          runs INTEGER NOT NULL,
-          until_tag TEXT NOT NULL,
-          list_added INTEGER NOT NULL DEFAULT 0,
-          pipeline_ok INTEGER NOT NULL DEFAULT 0,
-          pipeline_err INTEGER NOT NULL DEFAULT 0,
-          schedule_ok INTEGER NOT NULL DEFAULT 0,
-          db_path TEXT NOT NULL,
-          base_output_root TEXT NOT NULL,
-          last_error TEXT
+        f"""
+        CREATE TABLE IF NOT EXISTS {ITEMS_DO_TABLE} (
+          id TEXT PRIMARY KEY,
+          skip INTEGER NOT NULL DEFAULT 0,
+          hot_score REAL,
+          category TEXT NOT NULL,
+          title TEXT NOT NULL,
+          comments_count INTEGER NOT NULL,
+          first_post_at TEXT,
+          last_post_at TEXT NOT NULL,
+          list_add_at TEXT NOT NULL
         )
         """
+    )
+    expected_items_do = [
+        "id",
+        "skip",
+        "hot_score",
+        "category",
+        "title",
+        "comments_count",
+        "first_post_at",
+        "last_post_at",
+        "list_add_at",
+    ]
+    cols_items_do = [
+        str(r[1]) for r in con.execute(f"PRAGMA table_info({ITEMS_DO_TABLE})").fetchall()
+    ]
+    if cols_items_do and cols_items_do != expected_items_do:
+        tmp = f"{ITEMS_DO_TABLE}__rebuild"
+        con.execute(f"DROP TABLE IF EXISTS {tmp}")
+        con.execute(
+            f"""
+            CREATE TABLE {tmp} (
+              id TEXT PRIMARY KEY,
+              skip INTEGER NOT NULL DEFAULT 0,
+              hot_score REAL,
+              category TEXT NOT NULL,
+              title TEXT NOT NULL,
+              comments_count INTEGER NOT NULL,
+              first_post_at TEXT,
+              last_post_at TEXT NOT NULL,
+              list_add_at TEXT NOT NULL
+            )
+            """
+        )
+        common = [c for c in expected_items_do if c in cols_items_do]
+        if common:
+            sel = ", ".join(common)
+            con.execute(
+                f"INSERT OR REPLACE INTO {tmp} ({sel}) SELECT {sel} FROM {ITEMS_DO_TABLE}"
+            )
+        con.execute(f"DROP TABLE {ITEMS_DO_TABLE}")
+        con.execute(f"ALTER TABLE {tmp} RENAME TO {ITEMS_DO_TABLE}")
+
+    con.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {ITEMS_DONE_TABLE} (
+          id TEXT PRIMARY KEY,
+          skip INTEGER NOT NULL DEFAULT 0,
+          stage INTEGER NOT NULL DEFAULT {STA_02},
+          category TEXT,
+          post_title TEXT,
+          keywords TEXT,
+          url TEXT,
+          list_add_at TEXT,
+          video_created_at TEXT,
+          youtube_upload_at TEXT,
+          youtube_publish_at TEXT,
+          tiktok_upload_at TEXT,
+          tiktok_publish_at TEXT,
+          folder_delite_at TEXT,
+          folder_name TEXT
+        )
+        """
+    )
+
+    cols = {r[1] for r in con.execute(f"PRAGMA table_info({ITEMS_DONE_TABLE})").fetchall()}
+    if "upload_youtube_at" not in cols:
+        con.execute(f"ALTER TABLE {ITEMS_DONE_TABLE} ADD COLUMN upload_youtube_at TEXT")
+    if "upload_tiktok_at" not in cols:
+        con.execute(f"ALTER TABLE {ITEMS_DONE_TABLE} ADD COLUMN upload_tiktok_at TEXT")
+
+    con.execute(
+        f"CREATE INDEX IF NOT EXISTS idx_{ITEMS_DO_TABLE}_pick ON {ITEMS_DO_TABLE}(skip, hot_score DESC, list_add_at DESC, id DESC)"
+    )
+    con.execute(
+        f"CREATE INDEX IF NOT EXISTS idx_{ITEMS_DONE_TABLE}_stage ON {ITEMS_DONE_TABLE}(stage, skip, id DESC)"
     )
     con.commit()
 
 
-def count_items(con: sqlite3.Connection) -> int:
-    row = con.execute(f"SELECT COUNT(*) AS n FROM {TABLE_NAME}").fetchone()
-    return int(row["n"]) if row else 0
+def _pick_expr(cols: set[str], candidates: List[str], default_expr: str) -> str:
+    for c in candidates:
+        if c in cols:
+            return c
+    return default_expr
 
 
-def count_video_created(con: sqlite3.Connection) -> int:
-    row = con.execute(
-        f"SELECT COUNT(*) AS n FROM {TABLE_NAME} WHERE video_created_at IS NOT NULL AND video_created_at != ''"
-    ).fetchone()
-    return int(row["n"]) if row else 0
+def ensure_history_table(con: sqlite3.Connection) -> None:
+    cur = con.execute("PRAGMA table_info(run_history)")
+    rows = cur.fetchall()
+    if not rows:
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS run_history (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              steps TEXT NOT NULL,
+              start_at TEXT NOT NULL,
+              end_at TEXT NOT NULL,
+              sec REAL NOT NULL,
+              error TEXT
+            )
+            """
+        )
+        con.commit()
+        return
 
+    cols = {str(r[1]) for r in rows}
+    expected = {"id", "steps", "start_at", "end_at", "sec", "error"}
+    if cols == expected:
+        return
 
-def count_video_uploaded(con: sqlite3.Connection) -> int:
-    row = con.execute(
-        f"SELECT COUNT(*) AS n FROM {TABLE_NAME} WHERE upload_youtube_at IS NOT NULL AND upload_youtube_at != ''"
-    ).fetchone()
-    return int(row["n"]) if row else 0
-
-
-@dataclass
-class HistoryRun:
-    started_at: str
-    ended_at: str = ""
-    duration_sec: float = 0.0
-    steps: str = ""
-    runs: int = 0
-    until_tag: str = ""
-    list_added: int = 0
-    pipeline_ok: int = 0
-    pipeline_err: int = 0
-    schedule_ok: int = 0
-    last_error: str = ""
+    old = "run_history__old"
+    con.execute(f"DROP TABLE IF EXISTS {old}")
+    con.execute("ALTER TABLE run_history RENAME TO run_history__old")
+    con.execute(
+        """
+        CREATE TABLE run_history (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          steps TEXT NOT NULL,
+          start_at TEXT NOT NULL,
+          end_at TEXT NOT NULL,
+          sec REAL NOT NULL,
+          error TEXT
+        )
+        """
+    )
+    old_cols = {str(r[1]) for r in con.execute(f"PRAGMA table_info({old})").fetchall()}
+    steps_expr = _pick_expr(old_cols, ["steps"], "'create_video'")
+    start_expr = _pick_expr(old_cols, ["start_at", "started_at"], "''")
+    end_expr = _pick_expr(old_cols, ["end_at", "ended_at"], "''")
+    sec_expr = _pick_expr(old_cols, ["sec", "duration_sec"], "0")
+    err_expr = _pick_expr(old_cols, ["error", "last_error"], "NULL")
+    con.execute(
+        f"""
+        INSERT INTO run_history (steps, start_at, end_at, sec, error)
+        SELECT {steps_expr},
+               {start_expr},
+               {end_expr},
+               ROUND(COALESCE({sec_expr}, 0), 2),
+               {err_expr}
+          FROM {old}
+        """
+    )
+    con.execute(f"DROP TABLE {old}")
+    con.commit()
 
 
 def record_history(db_path: Path, h: HistoryRun) -> None:
@@ -209,26 +284,15 @@ def record_history(db_path: Path, h: HistoryRun) -> None:
             ensure_history_table(con)
             con.execute(
                 """
-                INSERT INTO historyRun (
-                  started_at, ended_at, duration_sec, steps, runs, until_tag,
-                  list_added, pipeline_ok, pipeline_err, schedule_ok,
-                  db_path, base_output_root, last_error
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO run_history (steps, start_at, end_at, sec, error)
+                VALUES (?, ?, ?, ?, ?)
                 """,
                 (
-                    h.started_at,
-                    h.ended_at,
-                    float(h.duration_sec),
                     h.steps,
-                    int(h.runs),
-                    h.until_tag,
-                    int(h.list_added),
-                    int(h.pipeline_ok),
-                    int(h.pipeline_err),
-                    int(h.schedule_ok),
-                    str(DB_PATH),
-                    str(CFG.BASE_OUTPUT_ROOT),
-                    h.last_error or None,
+                    h.start_at,
+                    h.end_at,
+                    round(max(0.0, float(h.sec)), 2),
+                    h.error or None,
                 ),
             )
             con.commit()
@@ -236,139 +300,9 @@ def record_history(db_path: Path, h: HistoryRun) -> None:
         pass
 
 
-def ensure_columns(con: sqlite3.Connection) -> None:
-    cur = con.execute(f"PRAGMA table_info({TABLE_NAME})")
-    cols = {row[1] for row in cur.fetchall()}
-
-    def add_col(sql: str):
-        try:
-            con.execute(sql)
-        except Exception:
-            pass
-
-    # single-table schema (add if missing)
-    if "skip" not in cols:
-        add_col(f"ALTER TABLE {TABLE_NAME} ADD COLUMN skip INTEGER NOT NULL DEFAULT 0")
-    if "stage" not in cols:
-        add_col(f"ALTER TABLE {TABLE_NAME} ADD COLUMN stage INTEGER NOT NULL DEFAULT 0")
-    if "category" not in cols:
-        add_col(f"ALTER TABLE {TABLE_NAME} ADD COLUMN category TEXT")
-    if "title" not in cols:
-        add_col(f"ALTER TABLE {TABLE_NAME} ADD COLUMN title TEXT")
-    if "post_title" not in cols:
-        add_col(f"ALTER TABLE {TABLE_NAME} ADD COLUMN post_title TEXT")
-    if "keywords" not in cols:
-        add_col(f"ALTER TABLE {TABLE_NAME} ADD COLUMN keywords TEXT")
-    if "first_post_at" not in cols:
-        add_col(f"ALTER TABLE {TABLE_NAME} ADD COLUMN first_post_at TEXT")
-    if "last_post_at" not in cols:
-        add_col(f"ALTER TABLE {TABLE_NAME} ADD COLUMN last_post_at TEXT")
-    if "comments_count" not in cols:
-        add_col(f"ALTER TABLE {TABLE_NAME} ADD COLUMN comments_count INTEGER")
-    if "url" not in cols:
-        add_col(f"ALTER TABLE {TABLE_NAME} ADD COLUMN url TEXT")
-    if "folder_name" not in cols:
-        add_col(f"ALTER TABLE {TABLE_NAME} ADD COLUMN folder_name TEXT")
-    if "hot_score_d" not in cols:
-        add_col(f"ALTER TABLE {TABLE_NAME} ADD COLUMN hot_score_d REAL")
-    if "list_add_at" not in cols:
-        add_col(f"ALTER TABLE {TABLE_NAME} ADD COLUMN list_add_at TEXT")
-    if "video_created_at" not in cols:
-        add_col(f"ALTER TABLE {TABLE_NAME} ADD COLUMN video_created_at TEXT")
-    if "upload_youtube_at" not in cols:
-        add_col(f"ALTER TABLE {TABLE_NAME} ADD COLUMN upload_youtube_at TEXT")
-    if "upload_tiktok_at" not in cols:
-        add_col(f"ALTER TABLE {TABLE_NAME} ADD COLUMN upload_tiktok_at TEXT")
-
-    if ENABLE_PICK_QUEUE_INDEX:
-        try:
-            con.execute(
-                f"CREATE INDEX IF NOT EXISTS {PICK_QUEUE_INDEX_NAME} ON {PICK_QUEUE_INDEX_SQL}"
-            )
-        except Exception:
-            pass
-
-    con.commit()
-
-
-def update_item(
-    con: sqlite3.Connection,
-    item_id: int,
-    *,
-    stage: int,
-) -> None:
-    con.execute(
-        f"""
-        UPDATE {TABLE_NAME}
-           SET stage = ?
-         WHERE id = ?
-        """,
-        (int(stage), int(item_id)),
-    )
-    con.commit()
-
-
-def fetch_status(con: sqlite3.Connection, item_id: int) -> Tuple[int, str]:
-    row = con.execute(
-        f"SELECT stage, COALESCE(folder_name,'') AS folder_name FROM {TABLE_NAME} WHERE id = ?",
-        (int(item_id),),
-    ).fetchone()
-    if row is None:
-        return (-999, "")
-    return (int(row["stage"]), str(row["folder_name"]))
-
-
-def require_stage(
-    con: sqlite3.Connection, item_id: int, expected: int, label: str
-) -> str:
-    st, folder = fetch_status(con, item_id)
-    print(
-        f"[STATUS] {label}: stage={st} folder_name={'(empty)' if not folder else folder}"
-    )
-    if st != int(expected):
-        raise RuntimeError(
-            f"{label}: expected stage={expected} but got {st} (id={item_id})"
-        )
-    return folder
-
-
-def run_script_realtime(
-    script_path: Path, timeout: Optional[int], extra_args: Optional[List[str]] = None
-) -> None:
-    if not script_path.exists():
-        raise FileNotFoundError(f"script not found: {script_path}")
-
-    cmd = [sys.executable, str(script_path)]
-    if extra_args:
-        cmd.extend(extra_args)
-
-    print("[RUN]", " ".join(cmd))
-    start = time.time()
-
-    p = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
-        universal_newlines=True,
-    )
-
-    try:
-        assert p.stdout is not None
-        for line in p.stdout:
-            print(line.rstrip("\n"))
-        rc = p.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        p.kill()
-        raise RuntimeError(f"{script_path.name} timeout")
-    finally:
-        elapsed = time.time() - start
-
-    if rc != 0:
-        raise RuntimeError(f"{script_path.name} failed (exit={rc})")
-
-    print(f"[OK] {script_path.name} finished in {fmt_sec(elapsed)}")
+def build_post_title(raw: str) -> str:
+    s = (raw or "").strip()
+    return s[:10]
 
 
 def _parse_steps(raw: str) -> List[str]:
@@ -385,11 +319,6 @@ def _pipeline_limit_tag(raw: str) -> str:
     if s in ("02", "03", "04", "05"):
         return s
     return "99"
-
-
-PIPELINE_STAGE_ORDER = ["02", "03", "04", "05", "99"]
-PIPELINE_LIMIT_TAG = _pipeline_limit_tag(RUN_PIPELINE_UNTIL)
-PIPELINE_LIMIT_IDX = PIPELINE_STAGE_ORDER.index(PIPELINE_LIMIT_TAG)
 
 
 def _stage_enabled(tag: str) -> bool:
@@ -410,314 +339,229 @@ def _stage_tag_from_value(v: int) -> Optional[str]:
     return None
 
 
-def guard_unique_stage(con: sqlite3.Connection, stage: int) -> None:
-    """
-    stageが複数あると「別IDを拾う」事故が起きるので止める。
-    各スクリプトは stage を見て自分で pick する前提なので必須ガード。
-    """
-    return
-
-
-def pick_inprogress_job(con: sqlite3.Connection) -> Optional[sqlite3.Row]:
-    """
-    単一実行向け:
-    - video_created_at が空のものだけ対象
-    - stage が最も大きいものを優先
-    """
+def pick_inprogress_job(
+    con: sqlite3.Connection, target_ids: Optional[List[str]] = None
+) -> Optional[sqlite3.Row]:
     stages_all = (STA_02, STA_03, STA_04, STA_05, STA_99)
     q = ",".join(["?"] * len(stages_all))
+    id_filter_sql = ""
+    params: List[object] = [int(x) for x in stages_all]
+    if target_ids:
+        ph = ",".join(["?"] * len(target_ids))
+        id_filter_sql = f" AND id IN ({ph})"
+        params.extend(target_ids)
     return con.execute(
         f"""
-        SELECT *
-          FROM {TABLE_NAME}
+        SELECT id, stage
+          FROM {ITEMS_DONE_TABLE}
          WHERE stage IN ({q})
            AND COALESCE(skip,0)=0
            AND COALESCE(video_created_at,'') = ''
-         ORDER BY stage DESC,
-                  COALESCE(hot_score_d,0) DESC,
-                  last_post_at DESC,
-                  id DESC
+           {id_filter_sql}
+         ORDER BY stage DESC, id DESC
          LIMIT 1
         """,
-        tuple(int(x) for x in stages_all),
+        tuple(params),
     ).fetchone()
 
 
-def lock_new_job_atomic(con: sqlite3.Connection) -> Optional[sqlite3.Row]:
-    """単一テーブル版では未使用（stageはbuild_listで付与）。"""
-    return None
+def enqueue_from_items_do(con: sqlite3.Connection, limit: int) -> List[str]:
+    if limit <= 0:
+        return []
+
+    rows = con.execute(
+        f"""
+        SELECT d.id, d.skip, d.category, d.title, d.list_add_at
+          FROM {ITEMS_DO_TABLE} d
+         WHERE COALESCE(d.skip,0)=0
+           AND NOT EXISTS (
+               SELECT 1 FROM {ITEMS_DONE_TABLE} n WHERE n.id = d.id
+           )
+         ORDER BY COALESCE(d.hot_score,0) DESC,
+                  d.list_add_at DESC,
+                  d.id DESC
+         LIMIT ?
+        """,
+        (int(limit),),
+    ).fetchall()
+
+    added_ids: List[str] = []
+    for r in rows:
+        stamp = now_folder_stamp()
+        item_id = str(r["id"])
+        title = str(r["title"] or "")
+        post_title = build_post_title(title)
+        folder_name = f"{stamp}_{item_id}_{post_title}"
+        url = f"https://girlschannel.net/topics/{item_id}/"
+        cur = con.execute(
+            f"""
+            INSERT OR IGNORE INTO {ITEMS_DONE_TABLE} (
+              id, skip, stage, category, post_title, keywords, url, list_add_at,
+              folder_name
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                item_id,
+                int(r["skip"] or 0),
+                int(STA_02),
+                str(r["category"] or ""),
+                post_title,
+                None,
+                url,
+                str(r["list_add_at"] or now_jst_str()),
+                folder_name,
+            ),
+        )
+        if cur.rowcount > 0:
+            added_ids.append(item_id)
+    con.commit()
+    return added_ids
 
 
-def process_one_item(con: sqlite3.Connection) -> int:
-    ensure_columns(con)
+def run_script(script_path: Path, timeout: Optional[int], extra_args: Optional[List[str]] = None) -> None:
+    if not script_path.exists():
+        raise FileNotFoundError(f"script not found: {script_path}")
 
-    row = pick_inprogress_job(con)
+    cmd = [sys.executable, str(script_path)]
+    if extra_args:
+        cmd.extend(extra_args)
+
+    cp = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    if cp.returncode != 0:
+        out = (cp.stdout or "").strip()
+        err = (cp.stderr or "").strip()
+        snippet = "\n".join([x for x in [out, err] if x][-20:]) if (out or err) else "(no output)"
+        raise RuntimeError(f"{script_path.name} failed (exit={cp.returncode})\n{snippet}")
+
+
+def process_one_item(
+    con: sqlite3.Connection, target_ids: Optional[List[str]] = None
+) -> int:
+    row = pick_inprogress_job(con, target_ids=target_ids)
     if row is None:
-        print("[INFO] no item to process (no STA stages).")
         return 0
 
-    item_id = int(row["id"])
     st = int(row["stage"])
-    print(f"[INFO] picked id={item_id} (stage={st})")
-
-    total_steps = 5  # 02/03/04/05/99
-
-    # パイプライン上限が現在ステージより前ならスキップ
     current_tag = _stage_tag_from_value(st)
     if current_tag is not None and not _stage_enabled(current_tag):
-        print(
-            f"[INFO] pipeline limit={PIPELINE_LIMIT_TAG} -> skip id={item_id} stage={current_tag}"
-        )
         return 0
 
-    # ---- 02 ----
     if st == STA_02 and _stage_enabled("02"):
-        step_line(1, total_steps, "データ取得 START")
-        try:
-            guard_unique_stage(con, STA_02)
-            require_stage(con, item_id, expected=STA_02, label="before 02")
-            run_script_realtime(SCRIPT_02, TIMEOUT_02)
-            folder_name = require_stage(con, item_id, expected=END_02, label="after 02")
-            if not folder_name.strip():
-                raise RuntimeError("after 02: folder_name is empty")
-            st = END_02
-            if PIPELINE_LIMIT_TAG == "02":
-                print(f"[INFO] pipeline limit reached at 02 for id={item_id}")
-                return 0
-        except Exception as e:
-            err = f"02 failed: {type(e).__name__}: {e}"
-            print(f"[ERROR] {err}", file=sys.stderr)
-            update_item(con, item_id, stage=STA_02)
-            print(f"[INFO] kept id={item_id} at stage={STA_02}")
-            return 1
-
-    # ---- 03 ----
+        run_script(SCRIPT_02, TIMEOUT_02)
+        return 0
     if st == STA_03 and _stage_enabled("03"):
-        step_line(2, total_steps, "画像生成 START")
-        try:
-            guard_unique_stage(con, STA_03)
-            require_stage(con, item_id, expected=STA_03, label="before 03")
-            run_script_realtime(SCRIPT_03, TIMEOUT_03)
-            require_stage(con, item_id, expected=END_03, label="after 03")
-            st = END_03
-            if PIPELINE_LIMIT_TAG == "03":
-                print(f"[INFO] pipeline limit reached at 03 for id={item_id}")
-                return 0
-        except Exception as e:
-            err = f"03 failed: {type(e).__name__}: {e}"
-            print(f"[ERROR] {err}", file=sys.stderr)
-            update_item(con, item_id, stage=STA_03)
-            print(f"[INFO] kept id={item_id} at stage={STA_03} (retry 03)")
-            return 1
-
-    # ---- 04 ----
+        run_script(SCRIPT_03, TIMEOUT_03)
+        return 0
     if st == STA_04 and _stage_enabled("04"):
-        step_line(3, total_steps, "音声生成 START")
-        try:
-            guard_unique_stage(con, STA_04)
-            require_stage(con, item_id, expected=STA_04, label="before 04")
-            run_script_realtime(SCRIPT_04, TIMEOUT_04)
-            require_stage(con, item_id, expected=END_04, label="after 04")
-            st = END_04
-            if PIPELINE_LIMIT_TAG == "04":
-                print(f"[INFO] pipeline limit reached at 04 for id={item_id}")
-                return 0
-        except Exception as e:
-            err = f"04 failed: {type(e).__name__}: {e}"
-            print(f"[ERROR] {err}", file=sys.stderr)
-            update_item(con, item_id, stage=STA_04)
-            print(f"[INFO] kept id={item_id} at stage={STA_04} (retry 04)")
-            return 1
-
-    # ---- 05 ----
+        run_script(SCRIPT_04, TIMEOUT_04)
+        return 0
     if st == STA_05 and _stage_enabled("05"):
-        step_line(4, total_steps, "プレビュー生成 START")
-        try:
-            guard_unique_stage(con, STA_05)
-            folder_name = require_stage(
-                con, item_id, expected=STA_05, label="before 05"
-            )
-
-            extra = None
-            if PASS_FOLDER_NAME_TO_05:
-                extra = ["--folder_name", folder_name]
-
-            run_script_realtime(SCRIPT_05, TIMEOUT_05, extra_args=extra)
-
-            require_stage(con, item_id, expected=END_05, label="after 05")
-            st = END_05
-            if PIPELINE_LIMIT_TAG == "05":
-                print(f"[INFO] pipeline limit reached at 05 for id={item_id}")
-                return 0
-        except Exception as e:
-            err = f"05 failed: {type(e).__name__}: {e}"
-            print(f"[ERROR] {err}", file=sys.stderr)
-            update_item(con, item_id, stage=STA_05)
-            print(f"[INFO] kept id={item_id} at stage={STA_05} (retry 05)")
-            return 1
-
-    # ---- 99 ----
+        run_script(SCRIPT_05, TIMEOUT_05)
+        return 0
     if st == STA_99 and _stage_enabled("99"):
-        step_line(5, total_steps, "動画組み立て START")
-        try:
-            guard_unique_stage(con, STA_99)
-            require_stage(con, item_id, expected=STA_99, label="before 99")
-            run_script_realtime(SCRIPT_99, TIMEOUT_99)
-            require_stage(con, item_id, expected=END_99, label="after 99")
-            banner(f"[DONE] pipeline finished id={item_id}  {now_jst_str()}")
-            return 0
-        except Exception as e:
-            err = f"99 failed: {type(e).__name__}: {e}"
-            print(f"[ERROR] {err}", file=sys.stderr)
-            update_item(con, item_id, stage=STA_99)
-            print(f"[INFO] kept id={item_id} at stage={STA_99} (retry 99)")
-            return 1
+        run_script(SCRIPT_99, TIMEOUT_99)
+        return 0
 
-    print(f"[INFO] id={item_id} stage={st} is not a STA stage (skip).")
     return 0
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument(
-        "--runs",
-        type=int,
-        default=RUNS_PIPELINE,
-        help="パイプラインを回す回数（RUNS_DEFAULTがデフォ）",
-    )
-    ap.add_argument(
-        "--steps",
-        type=str,
-        default=RUN_STEPS_RAW,
-        help="実行ステップ（pipeline / all）",
-    )
-    ap.add_argument(
-        "--until",
-        type=str,
-        default=RUN_PIPELINE_UNTIL,
-        help="パイプラインの上限ステージ（02/03/04/05/99/all）",
-    )
-    args = ap.parse_args()
+def count_completed_videos(con: sqlite3.Connection, target_ids: List[str]) -> int:
+    if not target_ids:
+        return 0
+    ph = ",".join(["?"] * len(target_ids))
+    row = con.execute(
+        f"""
+        SELECT COUNT(*) AS n
+          FROM {ITEMS_DONE_TABLE}
+         WHERE id IN ({ph})
+           AND (
+                 COALESCE(video_created_at,'') != ''
+                 OR stage = ?
+               )
+        """,
+        tuple(target_ids + [int(END_99)]),
+    ).fetchone()
+    return int(row["n"] or 0) if row else 0
 
+
+def main() -> int:
     if not DB_PATH.exists():
         print(f"[ERROR] DB not found: {DB_PATH}", file=sys.stderr)
         return 2
 
-    start_ts = now_jst_str()
+    steps = _parse_steps(RUN_STEPS_RAW)
+    limit_tag = _pipeline_limit_tag(PIPELINE_UNTIL_RAW)
+
+    global PIPELINE_LIMIT_TAG, PIPELINE_LIMIT_IDX
+    PIPELINE_LIMIT_TAG = limit_tag
+    PIPELINE_LIMIT_IDX = PIPELINE_STAGE_ORDER.index(PIPELINE_LIMIT_TAG)
+
+    target_video_count = int(RUNS_PIPELINE)
+    if target_video_count <= 0:
+        print("[ERROR] RUNS_DEFAULT は 1 以上にしてください", file=sys.stderr)
+        return 2
+    max_cycles = (
+        int(MAX_PIPELINE_CYCLES)
+        if int(MAX_PIPELINE_CYCLES) > 0
+        else max(30, target_video_count * 30)
+    )
+
+    hist = HistoryRun(steps="create_video", start_at=now_jst_str())
     t0 = time.time()
-
-    banner(f"LAUNCHER START  {start_ts}  runs={args.runs}")
-    print(f"[CONF] env              : {CFG.ENV_PATH}")
-    print(f"[CONF] DB_PATH          : {DB_PATH}")
-    print(f"[CONF] TABLE_NAME       : {TABLE_NAME}")
-    print(f"[CONF] SCRIPTS_DIR       : {SCRIPTS_DIR}")
-    print(f"[CONF] PICK_NEW_ORDER_SQL: {PICK_NEW_ORDER_SQL} (code)")
-    print(f"[CONF] ENABLE_PICK_QUEUE_INDEX : {ENABLE_PICK_QUEUE_INDEX}")
-    print(f"[CONF] PICK_QUEUE_INDEX_NAME   : {PICK_QUEUE_INDEX_NAME}")
-    print(f"[CONF] STOP_ON_ERROR     : {STOP_ON_ERROR}")
-    print(f"[CONF] RESET_TO_ZERO_ON_FAIL_02: {RESET_TO_ZERO_ON_FAIL_02}")
-    print(f"[CONF] SLEEP_SEC_WHEN_EMPTY: {SLEEP_SEC_WHEN_EMPTY}")
-    print(
-        f"[CONF] sqlite journal_mode={SQLITE_JOURNAL_MODE} synchronous={SQLITE_SYNCHRONOUS} busy_timeout_ms={BUSY_TIMEOUT_MS}"
-    )
-
-    print(f"[CONF] STA/END 02: {STA_02}->{END_02}")
-    print(f"[CONF] STA/END 03: {STA_03}->{END_03}")
-    print(f"[CONF] STA/END 04: {STA_04}->{END_04}")
-    print(f"[CONF] STA/END 05: {STA_05}->{END_05}")
-    print(f"[CONF] STA/END 99: {STA_99}->{END_99}")
-    print(f"[CONF] PASS_FOLDER_NAME_TO_05: {PASS_FOLDER_NAME_TO_05}")
-
-    print(f"[CONF] TIMEOUT_02 : {TIMEOUT_02}")
-    print(f"[CONF] TIMEOUT_03 : {TIMEOUT_03}")
-    print(f"[CONF] TIMEOUT_04 : {TIMEOUT_04}")
-    print(f"[CONF] TIMEOUT_05 : {TIMEOUT_05}")
-    print(f"[CONF] TIMEOUT_99 : {TIMEOUT_99}")
-    print(f"[CONF] TIMEOUT_LIST : {TIMEOUT_LIST}")
-    print(f"[CONF] TIMEOUT_SCHEDULE : {TIMEOUT_SCHEDULE}")
-
-    steps = _parse_steps(args.steps)
-    limit_tag = _pipeline_limit_tag(args.until)
-    print(f"[CONF] RUN_STEPS        : {steps}")
-    print(f"[CONF] PIPELINE_UNTIL   : {limit_tag}")
-
-    # 事前に存在チェック（早期に気づける）
-    for p in (
-        SCRIPT_02,
-        SCRIPT_03,
-        SCRIPT_04,
-        SCRIPT_05,
-        SCRIPT_99,
-    ):
-        if not p.exists():
-            print(f"[WARN] script not found at startup: {p}", file=sys.stderr)
-
-    hist = HistoryRun(
-        started_at=start_ts,
-        steps=",".join(steps),
-        runs=int(args.runs),
-        until_tag=str(limit_tag),
-    )
 
     ok_count = 0
     err_count = 0
-    created_before = 0
-    uploaded_before = 0
-    created_after = 0
-    uploaded_after = 0
+
     try:
         with connect(DB_PATH) as con:
-            ensure_columns(con)
-            created_before = count_video_created(con)
-            uploaded_before = count_video_uploaded(con)
+            ensure_tables(con)
+            if "pipeline" in steps:
+                target_ids = enqueue_from_items_do(con, target_video_count)
+                if not target_ids:
+                    print("[INFO] enqueue対象がありません（items_doに新規候補なし）")
+                    return 0
 
-        # pipeline
-        if "pipeline" in steps:
-            global PIPELINE_LIMIT_TAG, PIPELINE_LIMIT_IDX
-            PIPELINE_LIMIT_TAG = _pipeline_limit_tag(args.until)
-            PIPELINE_LIMIT_IDX = PIPELINE_STAGE_ORDER.index(PIPELINE_LIMIT_TAG)
+                pbar = tqdm(total=len(target_ids), desc="create_video", unit="video")
+                done = count_completed_videos(con, target_ids)
+                pbar.update(done)
 
-            with connect(DB_PATH) as con:
-                ensure_columns(con)
-
-                for i in range(args.runs):
-                    print(f"\n[LOOP] {i + 1}/{args.runs}")
-                    rc = process_one_item(con)
-
-                    if rc == 0:
-                        ok_count += 1
-                    else:
-                        err_count += 1
-                        if STOP_ON_ERROR:
-                            print("[INFO] STOP_ON_ERROR=True -> stop.")
+                cycles = 0
+                while done < len(target_ids):
+                    if cycles >= max_cycles:
+                        raise RuntimeError(
+                            f"max_cycles超過: done={done}/{len(target_ids)} cycles={cycles}"
+                        )
+                    try:
+                        rc = process_one_item(con, target_ids=target_ids)
+                        if rc == 0:
+                            ok_count += 1
+                        else:
+                            err_count += 1
+                        if STOP_ON_ERROR and err_count > 0:
                             break
-
+                    except Exception as e:
+                        err_count += 1
+                        pbar.write(f"[ERROR] {type(e).__name__}: {e}")
+                        if STOP_ON_ERROR:
+                            break
+                    finally:
+                        new_done = count_completed_videos(con, target_ids)
+                        if new_done > done:
+                            pbar.update(new_done - done)
+                        done = new_done
+                        cycles += 1
                     if SLEEP_SEC_WHEN_EMPTY > 0:
                         time.sleep(SLEEP_SEC_WHEN_EMPTY)
+                pbar.close()
 
         return 0 if err_count == 0 else 1
     except Exception as e:
-        hist.last_error = f"{type(e).__name__}: {e}"
+        hist.error = f"{type(e).__name__}: {e}"
         raise
     finally:
-        try:
-            with connect(DB_PATH) as con:
-                ensure_columns(con)
-                created_after = count_video_created(con)
-                uploaded_after = count_video_uploaded(con)
-        except Exception:
-            pass
-
-        hist.pipeline_ok = int(ok_count)
-        hist.pipeline_err = int(err_count)
-        hist.ended_at = now_jst_str()
-        hist.duration_sec = float(time.time() - t0)
+        hist.end_at = now_jst_str()
+        hist.sec = max(0.0, time.time() - t0)
         record_history(DB_PATH, hist)
-        created_delta = max(0, int(created_after - created_before))
-        uploaded_delta = max(0, int(uploaded_after - uploaded_before))
-        banner(
-            f"LAUNCHER END  {hist.ended_at}  created={created_delta} uploaded={uploaded_delta}"
-        )
 
 
 if __name__ == "__main__":

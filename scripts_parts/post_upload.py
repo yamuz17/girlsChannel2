@@ -29,8 +29,8 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 
-import env_loader
-from config import CFG
+from core import env_loader
+from core.config import CFG
 
 # .env / config.local.json を読み込み
 _ENV_PATH = env_loader.load_env()

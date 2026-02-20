@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-import env_loader
+from . import env_loader
 
 
 # 一度だけ env を読み込む
@@ -50,6 +50,8 @@ class Config:
     # --- base paths ---
     DB_PATH: Path
     TABLE_NAME: str
+    ITEMS_DO_TABLE: str
+    ITEMS_DONE_TABLE: str
     BASE_OUTPUT_ROOT: Path
     SCRIPTS_DIR: Path
 
@@ -112,7 +114,9 @@ class Config:
 
 CFG = Config(
     DB_PATH=_env_path("DB_PATH", None) or Path(),
-    TABLE_NAME=_env_str("TABLE_NAME", "items") or "items",
+    TABLE_NAME=_env_str("TABLE_NAME", "items_done") or "items_done",
+    ITEMS_DO_TABLE=_env_str("ITEMS_DO_TABLE", "items_do") or "items_do",
+    ITEMS_DONE_TABLE=_env_str("ITEMS_DONE_TABLE", "items_done") or "items_done",
     BASE_OUTPUT_ROOT=_env_path("BASE_OUTPUT_ROOT", None) or Path(),
     SCRIPTS_DIR=_env_path("SCRIPTS_DIR", str(Path(__file__).resolve().parent))
     or Path(__file__).resolve().parent,

@@ -29,8 +29,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from config import CFG
-from env_loader import env_str
+from core.config import CFG
+from core.env_loader import env_str
 
 # =========================================================
 # 設定（ここだけ変えればOK）
@@ -39,7 +39,7 @@ DB_PATH = CFG.DB_PATH
 if not DB_PATH:
     raise SystemExit("DB_PATH が未設定です（girlsChannel.env を確認）")
 
-TABLE_NAME = env_str("TABLE_NAME", "items") or "items"
+TABLE_NAME = CFG.ITEMS_DO_TABLE or "items_do"
 
 PAGE_FROM = int(env_str("PAGE_FROM", "1"))
 PAGE_TO = int(env_str("PAGE_TO", "15"))
@@ -58,7 +58,7 @@ HEADLESS = env_str("HEADLESS", "true").lower() in ("1", "true", "yes", "y", "on"
 SLEEP_SEC = float(env_str("SLEEP_SEC", "0.6"))
 TIMEOUT_MS = int(env_str("TIMEOUT_MS", "30000"))
 
-ECHO_EACH_SAVE = env_str("ECHO_EACH_SAVE", "true").lower() in (
+ECHO_EACH_SAVE = env_str("ECHO_EACH_SAVE", "false").lower() in (
     "1",
     "true",
     "yes",
@@ -226,27 +226,19 @@ DDL_ITEMS = f"""
 CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
   id TEXT PRIMARY KEY,
   skip INTEGER NOT NULL DEFAULT 0,
-  stage INTEGER NOT NULL DEFAULT 0,
+  hot_score REAL,
   category TEXT NOT NULL,
   title TEXT NOT NULL,
-  post_title TEXT,
-  keywords TEXT,
+  comments_count INTEGER NOT NULL,
   first_post_at TEXT,
   last_post_at TEXT NOT NULL,
-  comments_count INTEGER NOT NULL,
-  url TEXT NOT NULL,
-  folder_name TEXT,
-  hot_score_d REAL,
-  list_add_at TEXT NOT NULL,
-  video_created_at TEXT,
-  upload_youtube_at TEXT,
-  upload_tiktok_at TEXT
+  list_add_at TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_{TABLE_NAME}_stage ON {TABLE_NAME}(stage);
 CREATE INDEX IF NOT EXISTS idx_{TABLE_NAME}_skip ON {TABLE_NAME}(skip);
 CREATE INDEX IF NOT EXISTS idx_{TABLE_NAME}_category ON {TABLE_NAME}(category);
 CREATE INDEX IF NOT EXISTS idx_{TABLE_NAME}_last_post_at ON {TABLE_NAME}(last_post_at);
 CREATE INDEX IF NOT EXISTS idx_{TABLE_NAME}_comments ON {TABLE_NAME}(comments_count);
+CREATE INDEX IF NOT EXISTS idx_{TABLE_NAME}_hot ON {TABLE_NAME}(hot_score DESC, list_add_at DESC);
 """
 
 RE_TOPIC_HREF = re.compile(r"/topics/(\d+)/")
@@ -257,6 +249,152 @@ def now_jst_str() -> str:
     return datetime.now(ZoneInfo("Asia/Tokyo")).strftime("%Y/%m/%d-%H:%M:%S")
 
 
+def _pick_expr(cols: set[str], candidates: List[str], default_expr: str) -> str:
+    for c in candidates:
+        if c in cols:
+            return c
+    return default_expr
+
+
+def ensure_run_history_table(con: sqlite3.Connection) -> None:
+    cur = con.execute("PRAGMA table_info(run_history)")
+    rows = cur.fetchall()
+    if not rows:
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS run_history (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              steps TEXT NOT NULL,
+              start_at TEXT NOT NULL,
+              end_at TEXT NOT NULL,
+              sec REAL NOT NULL,
+              error TEXT
+            )
+            """
+        )
+        con.commit()
+        return
+
+    cols = {str(r[1]) for r in rows}
+    expected = {"id", "steps", "start_at", "end_at", "sec", "error"}
+    if cols == expected:
+        return
+
+    old = "run_history__old"
+    con.execute(f"DROP TABLE IF EXISTS {old}")
+    con.execute(f"ALTER TABLE run_history RENAME TO {old}")
+    con.execute(
+        """
+        CREATE TABLE run_history (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          steps TEXT NOT NULL,
+          start_at TEXT NOT NULL,
+          end_at TEXT NOT NULL,
+          sec REAL NOT NULL,
+          error TEXT
+        )
+        """
+    )
+    old_cols = {str(r[1]) for r in con.execute(f"PRAGMA table_info({old})").fetchall()}
+    steps_expr = _pick_expr(old_cols, ["steps"], "'build_list'")
+    start_expr = _pick_expr(old_cols, ["start_at", "started_at"], "''")
+    end_expr = _pick_expr(old_cols, ["end_at", "ended_at"], "''")
+    sec_expr = _pick_expr(old_cols, ["sec", "duration_sec"], "0")
+    err_expr = _pick_expr(old_cols, ["error", "last_error"], "NULL")
+    con.execute(
+        f"""
+        INSERT INTO run_history (steps, start_at, end_at, sec, error)
+        SELECT {steps_expr},
+               {start_expr},
+               {end_expr},
+               ROUND(COALESCE({sec_expr}, 0), 2),
+               {err_expr}
+          FROM {old}
+        """
+    )
+    con.execute(f"DROP TABLE {old}")
+    con.commit()
+
+
+def record_run_history(
+    db_path: Path, *, steps: str, start_at: str, end_at: str, sec: float, error: str
+) -> None:
+    try:
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        con = sqlite3.connect(str(db_path), timeout=30)
+        try:
+            ensure_run_history_table(con)
+            con.execute(
+                """
+                INSERT INTO run_history (steps, start_at, end_at, sec, error)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (steps, start_at, end_at, round(max(0.0, float(sec)), 2), error or None),
+            )
+            con.commit()
+        finally:
+            con.close()
+    except Exception:
+        pass
+
+
+def _ensure_items_do_column_order(con: sqlite3.Connection) -> None:
+    expected = [
+        "id",
+        "skip",
+        "hot_score",
+        "category",
+        "title",
+        "comments_count",
+        "first_post_at",
+        "last_post_at",
+        "list_add_at",
+    ]
+    cur = con.execute(f"PRAGMA table_info({TABLE_NAME})")
+    cols = [str(r[1]) for r in cur.fetchall()]
+    if cols == expected:
+        return
+    if not cols:
+        return
+
+    tmp = f"{TABLE_NAME}__rebuild"
+    con.execute(f"DROP TABLE IF EXISTS {tmp}")
+    con.execute(
+        f"""
+        CREATE TABLE {tmp} (
+          id TEXT PRIMARY KEY,
+          skip INTEGER NOT NULL DEFAULT 0,
+          hot_score REAL,
+          category TEXT NOT NULL,
+          title TEXT NOT NULL,
+          comments_count INTEGER NOT NULL,
+          first_post_at TEXT,
+          last_post_at TEXT NOT NULL,
+          list_add_at TEXT NOT NULL
+        )
+        """
+    )
+    common = [c for c in expected if c in cols]
+    if common:
+        sel = ", ".join(common)
+        con.execute(f"INSERT OR REPLACE INTO {tmp} ({sel}) SELECT {sel} FROM {TABLE_NAME}")
+    con.execute(f"DROP TABLE {TABLE_NAME}")
+    con.execute(f"ALTER TABLE {tmp} RENAME TO {TABLE_NAME}")
+    con.execute(f"CREATE INDEX IF NOT EXISTS idx_{TABLE_NAME}_skip ON {TABLE_NAME}(skip)")
+    con.execute(
+        f"CREATE INDEX IF NOT EXISTS idx_{TABLE_NAME}_category ON {TABLE_NAME}(category)"
+    )
+    con.execute(
+        f"CREATE INDEX IF NOT EXISTS idx_{TABLE_NAME}_last_post_at ON {TABLE_NAME}(last_post_at)"
+    )
+    con.execute(
+        f"CREATE INDEX IF NOT EXISTS idx_{TABLE_NAME}_comments ON {TABLE_NAME}(comments_count)"
+    )
+    con.execute(
+        f"CREATE INDEX IF NOT EXISTS idx_{TABLE_NAME}_hot ON {TABLE_NAME}(hot_score DESC, list_add_at DESC)"
+    )
+
+
 def connect(db_path: Path) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(str(db_path), timeout=30)
@@ -264,6 +402,7 @@ def connect(db_path: Path) -> sqlite3.Connection:
     con.execute("PRAGMA journal_mode=WAL;")
     con.execute("PRAGMA synchronous=NORMAL;")
     con.executescript(DDL_ITEMS)
+    _ensure_items_do_column_order(con)
     con.create_function(
         "category_multiplier",
         1,
@@ -305,45 +444,30 @@ def contains_badword(text: str) -> bool:
 def upsert_item(con: sqlite3.Connection, row: Dict[str, Any]) -> None:
     sql = f"""
     INSERT INTO {TABLE_NAME} (
-      id, skip, stage, category, title, post_title, keywords,
-      first_post_at, last_post_at, comments_count, url, folder_name,
-      hot_score_d, list_add_at,
-      video_created_at, upload_youtube_at, upload_tiktok_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      id, skip, hot_score, category, title, comments_count,
+      first_post_at, last_post_at, list_add_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       skip = CASE WHEN {TABLE_NAME}.skip = 1 THEN 1 ELSE excluded.skip END,
-      stage = {TABLE_NAME}.stage,
       category=excluded.category,
       title=excluded.title,
-      post_title=excluded.post_title,
-      keywords=excluded.keywords,
       first_post_at=COALESCE({TABLE_NAME}.first_post_at, excluded.first_post_at),
       last_post_at=excluded.last_post_at,
       comments_count=excluded.comments_count,
-      url=excluded.url,
-      folder_name=COALESCE({TABLE_NAME}.folder_name, excluded.folder_name),
-      hot_score_d=excluded.hot_score_d
+      hot_score=excluded.hot_score
     """
     con.execute(
         sql,
         (
             row["id"],
             int(row.get("skip", 0)),
-            int(row.get("stage", 0)),
+            row.get("hot_score"),
             row["category"],
             row["title"],
-            row.get("post_title"),
-            row.get("keywords"),
+            int(row["comments_count"]),
             row.get("first_post_at"),
             row["last_post_at"],
-            int(row["comments_count"]),
-            row["url"],
-            row.get("folder_name"),
-            row.get("hot_score_d"),
             row["list_add_at"],
-            row.get("video_created_at"),
-            row.get("upload_youtube_at"),
-            row.get("upload_tiktok_at"),
         ),
     )
 
@@ -396,7 +520,7 @@ def recompute_hot_scores(con: sqlite3.Connection) -> None:
         f"""
         UPDATE {TABLE_NAME}
            SET
-             hot_score_d =
+             hot_score =
                CASE
                  WHEN first_post_at IS NULL OR first_post_at='' THEN NULL
                  WHEN last_post_at  IS NULL OR last_post_at ='' THEN NULL
@@ -437,265 +561,268 @@ def build_post_title(title: str) -> str:
 
 
 def main() -> int:
-    if TARGET_NEW_COUNT <= 0:
-        raise SystemExit("TARGET_NEW_COUNT は 1以上にしてください")
-    if PAGE_FROM <= 0 or PAGE_TO <= 0 or PAGE_TO < PAGE_FROM:
-        raise SystemExit("PAGE_FROM/PAGE_TO の指定が不正です")
-    if MIN_COMMENTS < 0:
-        raise SystemExit("MIN_COMMENTS は 0以上にしてください")
-    if not CATEGORIES:
-        raise SystemExit("CATEGORIES が空です")
+    run_start = now_jst_str()
+    t0 = time.time()
+    run_error = ""
+    try:
+        if TARGET_NEW_COUNT <= 0:
+            raise SystemExit("TARGET_NEW_COUNT は 1以上にしてください")
+        if PAGE_FROM <= 0 or PAGE_TO <= 0 or PAGE_TO < PAGE_FROM:
+            raise SystemExit("PAGE_FROM/PAGE_TO の指定が不正です")
+        if MIN_COMMENTS < 0:
+            raise SystemExit("MIN_COMMENTS は 0以上にしてください")
+        if not CATEGORIES:
+            raise SystemExit("CATEGORIES が空です")
 
-    con = connect(DB_PATH)
+        con = connect(DB_PATH)
 
-    saved = 0
-    pages_done = 0
-    seen = 0
-    skipped_exists = 0
-    skipped_under_min = 0
-    skipped_badword = 0
-    failed_item = 0
-    failed_page = 0
+        saved = 0
+        pages_done = 0
+        seen = 0
+        skipped_exists = 0
+        skipped_under_min = 0
+        skipped_badword = 0
+        failed_item = 0
+        failed_page = 0
 
-    new_ids: List[str] = []
-    first_post_filled = 0
-    first_post_failed = 0
+        new_ids: List[str] = []
+        first_post_filled = 0
+        first_post_failed = 0
 
-    print(f"[INFO] DB: {DB_PATH}")
-    print(f"[INFO] table: {TABLE_NAME}")
-    print(f"[INFO] page_from..to: {PAGE_FROM}..{PAGE_TO}")
-    print(f"[INFO] target_save(total): {TARGET_NEW_COUNT}")
-    print(f"[INFO] min_comments: {MIN_COMMENTS}")
-    print(f"[INFO] update_existing: {UPDATE_EXISTING}")
-    print(f"[INFO] categories: {', '.join([c.name for c in CATEGORIES])}")
-    for c in CATEGORIES:
-        print(f"  - {c.name}: {c.base_url}/?{(c.params or '').lstrip('?')}")
-    print(f"[INFO] early_stop_pages(per_category): {EARLY_STOP_PAGES}")
-    print(f"[INFO] post_title: {ENABLE_POST_TITLE}")
+        print(f"[INFO] DB: {DB_PATH}")
+        print(f"[INFO] table: {TABLE_NAME}")
+        print(f"[INFO] page_from..to: {PAGE_FROM}..{PAGE_TO}")
+        print(f"[INFO] target_save(total): {TARGET_NEW_COUNT}")
+        print(f"[INFO] min_comments: {MIN_COMMENTS}")
+        print(f"[INFO] update_existing: {UPDATE_EXISTING}")
+        print(f"[INFO] categories: {', '.join([c.name for c in CATEGORIES])}")
+        for c in CATEGORIES:
+            print(f"  - {c.name}: {c.base_url}/?{(c.params or '').lstrip('?')}")
+        print(f"[INFO] early_stop_pages(per_category): {EARLY_STOP_PAGES}")
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=HEADLESS)
-        context = browser.new_context(locale="ja-JP")
-        page = context.new_page()
-        detail_page = context.new_page()
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=HEADLESS)
+            context = browser.new_context(locale="ja-JP")
+            page = context.new_page()
+            detail_page = context.new_page()
 
-        try:
-            pbar = tqdm(total=TARGET_NEW_COUNT, desc="saved")
+            try:
+                pbar = tqdm(total=TARGET_NEW_COUNT, desc="saved")
 
-            for cfg in CATEGORIES:
-                if saved >= TARGET_NEW_COUNT:
-                    break
-
-                print(
-                    f"\n[CATEGORY] {cfg.name}  base={cfg.base_url}  params={cfg.params}"
-                )
-                consecutive_no_save_pages = 0
-
-                for page_no in range(PAGE_FROM, PAGE_TO + 1):
+                for cfg in CATEGORIES:
                     if saved >= TARGET_NEW_COUNT:
                         break
 
-                    pages_done += 1
-                    url = build_page_url(cfg, page_no)
-
-                    try:
-                        resp = page.goto(
-                            url, wait_until="domcontentloaded", timeout=TIMEOUT_MS
-                        )
-                        status = resp.status if resp else None
-                        if (not resp) or (status and status >= 400):
-                            failed_page += 1
-                            print(
-                                f"[PAGE_FAIL] cat={cfg.name} page={page_no} status={status} url={url}"
-                            )
-                            time.sleep(SLEEP_SEC)
-                            continue
-                    except PWTimeoutError:
-                        failed_page += 1
-                        print(f"[PAGE_TIMEOUT] cat={cfg.name} page={page_no} url={url}")
-                        time.sleep(SLEEP_SEC)
-                        continue
-
-                    li_locator = page.locator(
-                        "xpath=/html/body/div[1]/div[1]/div[1]/ul[2]/li"
+                    print(
+                        f"\n[CATEGORY] {cfg.name}  base={cfg.base_url}  params={cfg.params}"
                     )
-                    li_count = li_locator.count()
-                    if li_count == 0:
-                        print(f"[NO_ITEMS] cat={cfg.name} page={page_no} url={url}")
-                        break
+                    consecutive_no_save_pages = 0
 
-                    page_rows: List[Tuple[int, Dict[str, Any], int]] = []
-
-                    for idx in range(1, li_count + 1):
-                        seen += 1
-
-                        a = page.locator(
-                            f"xpath=/html/body/div[1]/div[1]/div[1]/ul[2]/li[{idx}]/a"
-                        ).first
-                        href = a.get_attribute("href") or ""
-                        m = RE_TOPIC_HREF.search(href)
-                        if not m:
-                            failed_item += 1
-                            continue
-                        tid = m.group(1)
-
-                        try:
-                            comments_raw = (
-                                page.locator(
-                                    f"xpath=/html/body/div[1]/div[1]/div[1]/ul[2]/li[{idx}]/a/div/p/span[2]"
-                                )
-                                .first.inner_text(timeout=5000)
-                                .strip()
-                            )
-                            post_raw = (
-                                page.locator(
-                                    f"xpath=/html/body/div[1]/div[1]/div[1]/ul[2]/li[{idx}]/a/div/p/span[3]"
-                                )
-                                .first.inner_text(timeout=5000)
-                                .strip()
-                            )
-                            title = (
-                                page.locator(
-                                    f"xpath=/html/body/div[1]/div[1]/div[1]/ul[2]/li[{idx}]/a/p"
-                                )
-                                .first.inner_text(timeout=5000)
-                                .strip()
-                            )
-                        except PWTimeoutError:
-                            failed_item += 1
-                            continue
-
-                        comments_count = digits_only_int(comments_raw)
-                        if comments_count < MIN_COMMENTS:
-                            skipped_under_min += 1
-                            continue
-
-                        badword_flag = 1 if contains_badword(title) else 0
-                        if badword_flag:
-                            skipped_badword += 1
-
-                        if (not UPDATE_EXISTING) and exists_id(con, tid):
-                            skipped_exists += 1
-                            continue
-
-                        last_post_at = normalize_list_datetime(post_raw)
-                        now_ts = now_jst_str()
-                        src_url = f"https://girlschannel.net/topics/{tid}/"
-
-                        row: Dict[str, Any] = {
-                            "id": tid,
-                            "skip": badword_flag,
-                            "stage": 10,
-                            "category": cfg.name,
-                            "title": title,
-                            "post_title": None,
-                            "keywords": None,
-                            "first_post_at": None,
-                            "last_post_at": last_post_at,
-                            "comments_count": comments_count,
-                            "url": src_url,
-                            "folder_name": None,
-                            "hot_score_d": None,
-                            "list_add_at": now_ts,
-                            "video_created_at": None,
-                            "upload_youtube_at": None,
-                            "upload_tiktok_at": None,
-                        }
-                        if ENABLE_POST_TITLE:
-                            row["post_title"] = build_post_title(title)
-
-                        page_rows.append((idx, row, badword_flag))
-
-                    page_rows.sort(
-                        key=lambda t: (
-                            -int(t[1]["comments_count"]),
-                            str(t[1]["last_post_at"]),
-                        )
-                    )
-
-                    page_saved = 0
-                    for orig_idx, row, badword_flag in page_rows:
+                    for page_no in range(PAGE_FROM, PAGE_TO + 1):
                         if saved >= TARGET_NEW_COUNT:
                             break
 
-                        existed = exists_id(con, row["id"])
-                        upsert_item(con, row)
-                        con.commit()
+                        pages_done += 1
+                        url = build_page_url(cfg, page_no)
 
-                        if not existed:
-                            new_ids.append(row["id"])
-
-                        saved += 1
-                        page_saved += 1
-                        pbar.update(1)
-
-                        if ECHO_EACH_SAVE:
-                            suffix = " skip=1" if badword_flag else ""
-                            print(
-                                f"[OK] cat={cfg.name} page={page_no} li={orig_idx} saved={saved} id={row['id']} "
-                                f"post={row['last_post_at']} c={row['comments_count']} "
-                                f"title={row['title'][:60]}{suffix}"
+                        try:
+                            resp = page.goto(
+                                url, wait_until="domcontentloaded", timeout=TIMEOUT_MS
                             )
+                            status = resp.status if resp else None
+                            if (not resp) or (status and status >= 400):
+                                failed_page += 1
+                                print(
+                                    f"[PAGE_FAIL] cat={cfg.name} page={page_no} status={status} url={url}"
+                                )
+                                time.sleep(SLEEP_SEC)
+                                continue
+                        except PWTimeoutError:
+                            failed_page += 1
+                            print(
+                                f"[PAGE_TIMEOUT] cat={cfg.name} page={page_no} url={url}"
+                            )
+                            time.sleep(SLEEP_SEC)
+                            continue
 
-                    if page_saved == 0:
-                        consecutive_no_save_pages += 1
-                        print(
-                            f"[NO_SAVE] cat={cfg.name} page={page_no} consecutive={consecutive_no_save_pages} "
-                            f"(under_min_total={skipped_under_min}, exists_total={skipped_exists}, failed_total={failed_item})"
+                        li_locator = page.locator(
+                            "xpath=/html/body/div[1]/div[1]/div[1]/ul[2]/li"
                         )
-                        if (
-                            EARLY_STOP_PAGES > 0
-                            and consecutive_no_save_pages >= EARLY_STOP_PAGES
-                        ):
-                            print(
-                                "[EARLY_STOP] no saved items for consecutive pages (this category) -> stop this category"
-                            )
+                        li_count = li_locator.count()
+                        if li_count == 0:
+                            print(f"[NO_ITEMS] cat={cfg.name} page={page_no} url={url}")
                             break
-                    else:
-                        consecutive_no_save_pages = 0
 
-                    time.sleep(SLEEP_SEC)
+                        page_rows: List[Tuple[int, Dict[str, Any], int]] = []
 
-            pbar.close()
+                        for idx in range(1, li_count + 1):
+                            seen += 1
 
-            if ENABLE_FIRST_POST and new_ids:
-                print("\n[STEP] fetch first_post (newly inserted only)")
-                for tid in new_ids:
-                    fp = fetch_first_post_via_comment1(detail_page, tid)
-                    if fp:
-                        con.execute(
-                            f"UPDATE {TABLE_NAME} SET first_post_at = COALESCE(first_post_at, ?) WHERE id=?",
-                            (fp, tid),
+                            a = page.locator(
+                                f"xpath=/html/body/div[1]/div[1]/div[1]/ul[2]/li[{idx}]/a"
+                            ).first
+                            href = a.get_attribute("href") or ""
+                            m = RE_TOPIC_HREF.search(href)
+                            if not m:
+                                failed_item += 1
+                                continue
+                            tid = m.group(1)
+
+                            try:
+                                comments_raw = (
+                                    page.locator(
+                                        f"xpath=/html/body/div[1]/div[1]/div[1]/ul[2]/li[{idx}]/a/div/p/span[2]"
+                                    )
+                                    .first.inner_text(timeout=5000)
+                                    .strip()
+                                )
+                                post_raw = (
+                                    page.locator(
+                                        f"xpath=/html/body/div[1]/div[1]/div[1]/ul[2]/li[{idx}]/a/div/p/span[3]"
+                                    )
+                                    .first.inner_text(timeout=5000)
+                                    .strip()
+                                )
+                                title = (
+                                    page.locator(
+                                        f"xpath=/html/body/div[1]/div[1]/div[1]/ul[2]/li[{idx}]/a/p"
+                                    )
+                                    .first.inner_text(timeout=5000)
+                                    .strip()
+                                )
+                            except PWTimeoutError:
+                                failed_item += 1
+                                continue
+
+                            comments_count = digits_only_int(comments_raw)
+                            if comments_count < MIN_COMMENTS:
+                                skipped_under_min += 1
+                                continue
+
+                            badword_flag = 1 if contains_badword(title) else 0
+                            if badword_flag:
+                                skipped_badword += 1
+
+                            if (not UPDATE_EXISTING) and exists_id(con, tid):
+                                skipped_exists += 1
+                                continue
+
+                            last_post_at = normalize_list_datetime(post_raw)
+                            now_ts = now_jst_str()
+                            row: Dict[str, Any] = {
+                                "id": tid,
+                                "skip": badword_flag,
+                                "hot_score": None,
+                                "category": cfg.name,
+                                "title": title,
+                                "comments_count": comments_count,
+                                "first_post_at": None,
+                                "last_post_at": last_post_at,
+                                "list_add_at": now_ts,
+                            }
+
+                            page_rows.append((idx, row, badword_flag))
+
+                        page_rows.sort(
+                            key=lambda t: (
+                                -int(t[1]["comments_count"]),
+                                str(t[1]["last_post_at"]),
+                            )
                         )
-                        con.commit()
-                        first_post_filled += 1
-                    else:
-                        first_post_failed += 1
-                    if DETAIL_SLEEP_SEC > 0:
-                        time.sleep(DETAIL_SLEEP_SEC)
 
-            if HOTNESS_ENABLE:
-                print("\n[STEP] recompute hotness")
-                recompute_hot_scores(con)
+                        page_saved = 0
+                        for orig_idx, row, badword_flag in page_rows:
+                            if saved >= TARGET_NEW_COUNT:
+                                break
 
-        finally:
-            con.close()
-            context.close()
-            browser.close()
+                            existed = exists_id(con, row["id"])
+                            upsert_item(con, row)
+                            con.commit()
 
-    print("\n[SUMMARY]")
-    print(f"  saved={saved} target={TARGET_NEW_COUNT}")
-    print(
-        f"  pages_done={pages_done} range={PAGE_FROM}..{PAGE_TO}  categories={len(CATEGORIES)}"
-    )
-    print(
-        f"  seen={seen} under_min={skipped_under_min} skipped_exists={skipped_exists} failed_item={failed_item} failed_page={failed_page}"
-    )
-    print(f"  skipped_badword={skipped_badword}")
-    if ENABLE_FIRST_POST:
-        print(f"  first_post filled={first_post_filled} failed={first_post_failed}")
+                            if not existed:
+                                new_ids.append(row["id"])
 
-    return 0
+                            saved += 1
+                            page_saved += 1
+                            pbar.update(1)
+
+                            if ECHO_EACH_SAVE:
+                                suffix = " skip=1" if badword_flag else ""
+                                print(
+                                    f"[OK] cat={cfg.name} page={page_no} li={orig_idx} saved={saved} id={row['id']} "
+                                    f"post={row['last_post_at']} c={row['comments_count']} "
+                                    f"title={row['title'][:60]}{suffix}"
+                                )
+
+                        if page_saved == 0:
+                            consecutive_no_save_pages += 1
+                            print(
+                                f"[NO_SAVE] cat={cfg.name} page={page_no} consecutive={consecutive_no_save_pages} "
+                                f"(under_min_total={skipped_under_min}, exists_total={skipped_exists}, failed_total={failed_item})"
+                            )
+                            if (
+                                EARLY_STOP_PAGES > 0
+                                and consecutive_no_save_pages >= EARLY_STOP_PAGES
+                            ):
+                                print(
+                                    "[EARLY_STOP] no saved items for consecutive pages (this category) -> stop this category"
+                                )
+                                break
+                        else:
+                            consecutive_no_save_pages = 0
+
+                        time.sleep(SLEEP_SEC)
+
+                pbar.close()
+
+                if ENABLE_FIRST_POST and new_ids:
+                    print("\n[STEP] fetch first_post (newly inserted only)")
+                    for tid in new_ids:
+                        fp = fetch_first_post_via_comment1(detail_page, tid)
+                        if fp:
+                            con.execute(
+                                f"UPDATE {TABLE_NAME} SET first_post_at = COALESCE(first_post_at, ?) WHERE id=?",
+                                (fp, tid),
+                            )
+                            con.commit()
+                            first_post_filled += 1
+                        else:
+                            first_post_failed += 1
+                        if DETAIL_SLEEP_SEC > 0:
+                            time.sleep(DETAIL_SLEEP_SEC)
+
+                if HOTNESS_ENABLE:
+                    print("\n[STEP] recompute hotness")
+                    recompute_hot_scores(con)
+            finally:
+                con.close()
+                context.close()
+                browser.close()
+
+        print("\n[SUMMARY]")
+        print(f"  saved={saved} target={TARGET_NEW_COUNT}")
+        print(
+            f"  pages_done={pages_done} range={PAGE_FROM}..{PAGE_TO}  categories={len(CATEGORIES)}"
+        )
+        print(
+            f"  seen={seen} under_min={skipped_under_min} skipped_exists={skipped_exists} failed_item={failed_item} failed_page={failed_page}"
+        )
+        print(f"  skipped_badword={skipped_badword}")
+        if ENABLE_FIRST_POST:
+            print(f"  first_post filled={first_post_filled} failed={first_post_failed}")
+        return 0
+    except Exception as e:
+        run_error = f"{type(e).__name__}: {e}"
+        raise
+    finally:
+        record_run_history(
+            DB_PATH,
+            steps="build_list",
+            start_at=run_start,
+            end_at=now_jst_str(),
+            sec=time.time() - t0,
+            error=run_error,
+        )
 
 
 if __name__ == "__main__":

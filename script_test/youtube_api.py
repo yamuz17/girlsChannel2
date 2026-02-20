@@ -23,8 +23,8 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 # repo直下モジュールの読み込み
-import env_loader
-from config import CFG as APP_CFG
+from core import env_loader
+from core.config import CFG as APP_CFG
 
 # .env / config.local.json を読み込み
 env_loader.load_env()

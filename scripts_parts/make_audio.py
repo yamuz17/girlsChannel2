@@ -20,7 +20,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-import queue_db
+from core import queue_db
 
 
 # =========================
@@ -56,7 +56,7 @@ VOICE_APP_CANDIDATES = [
 VOICE_BOOT_TIMEOUT_SEC = float(queue_db._env_str("VOICE_BOOT_TIMEOUT_SEC", "60"))
 VOICE_POLL_INTERVAL_SEC = float(queue_db._env_str("VOICE_POLL_INTERVAL_SEC", "2"))
 
-TOTAL_VIDEO_SEC = float(queue_db._env_str("TOTAL_VIDEO_SEC", "45.0"))
+TOTAL_VIDEO_SEC = float(queue_db._env_str("TOTAL_VIDEO_SEC", "70.0"))
 SILENCE_MS = int(queue_db._env_int("SILENCE_MS", 400))
 MIN_SEC_PER_COMMENT = float(queue_db._env_str("MIN_SEC_PER_COMMENT", "2.0"))
 MAX_SEC_PER_COMMENT = float(queue_db._env_str("MAX_SEC_PER_COMMENT", "7.5"))

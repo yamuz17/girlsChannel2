@@ -43,8 +43,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-import env_loader
-from config import CFG
+from core import env_loader
+from core.config import CFG
 
 
 # =========================================================
@@ -533,6 +533,44 @@ def contains_badword(text: str) -> bool:
     return False
 
 
+def filter_badword_tags(tags: List[str]) -> tuple[List[str], int]:
+    if not ENABLE_EXCLUDE_BADWORDS:
+        return tags, 0
+    kept: List[str] = []
+    removed = 0
+    for t in tags:
+        if contains_badword(t):
+            removed += 1
+            continue
+        kept.append(t)
+    return kept, removed
+
+
+def filter_badword_keywords_json(keywords_json: str) -> tuple[str, int]:
+    s = (keywords_json or "").strip()
+    if not s or (not ENABLE_EXCLUDE_BADWORDS):
+        return s, 0
+    try:
+        arr = json.loads(s)
+    except Exception:
+        return s, 0
+    if not isinstance(arr, list):
+        return s, 0
+    cleaned: List[str] = []
+    removed = 0
+    for raw in arr:
+        t = clean_keyword_tag(str(raw or ""))
+        if not t:
+            continue
+        if contains_badword(t):
+            removed += 1
+            continue
+        cleaned.append(t)
+    if not cleaned:
+        return "", removed
+    return json.dumps(cleaned, ensure_ascii=False), removed
+
+
 # ===================== スクレイピング =====================
 async def extract_related_keywords(page) -> List[str]:
     loc = page.locator(RELATED_KEYWORDS_CSS)
@@ -618,7 +656,7 @@ async def scrape(
             thread_title = clean_title(thread_title)
 
             folder_title = title_for_folder(thread_title)
-            folder_name = f"{topic_id}_{run_stamp}_{folder_title}"
+            folder_name = f"{run_stamp}_{topic_id}_{folder_title}"
 
             base_dir = BASE_OUTPUT_ROOT / folder_name
             text_dir = base_dir / "text"
@@ -642,6 +680,9 @@ async def scrape(
                 keywords_raw_json = await extract_keywords_raw_from_meta(page)
             except Exception:
                 keywords_raw_json = ""
+            keywords_raw_json, removed_meta_keywords = filter_badword_keywords_json(
+                keywords_raw_json
+            )
 
             (text_dir / "keywords_raw.txt").write_text(
                 keywords_raw_json or "", encoding="utf-8"
@@ -660,6 +701,9 @@ async def scrape(
                     related_keywords = await extract_related_keywords(page)
                 except Exception:
                     related_keywords = []
+                related_keywords, removed_related_keywords = filter_badword_tags(
+                    related_keywords
+                )
 
                 kw_path = text_dir / "related_keywords.txt"
                 with kw_path.open("w", encoding="utf-8") as f:
@@ -673,6 +717,12 @@ async def scrape(
                     )
                 else:
                     print("   -> 関連キーワード: 取得なし")
+                if ENABLE_EXCLUDE_BADWORDS:
+                    removed_total = removed_meta_keywords + removed_related_keywords
+                    if removed_total > 0:
+                        print(
+                            f"   -> keyword badword除外: meta={removed_meta_keywords} related={removed_related_keywords}"
+                        )
 
             print("2. メイン画像取得...")
             main_img_path: Optional[Path] = None

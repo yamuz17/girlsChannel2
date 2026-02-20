@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Optional, Tuple
 from zoneinfo import ZoneInfo
 
-from config import CFG
+from .config import CFG
 
 # python-dotenv（入ってる前提）
 try:
