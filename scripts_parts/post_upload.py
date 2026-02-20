@@ -74,18 +74,21 @@ CFG = {
     "STOP_ON_FIRST_ERROR": False,  # 1本失敗したら止める（普段はFalse推奨）
     # --- scheduling (JST 기준で作ってUTCに変換) ---
     "SCHEDULE_ENABLED": True,  # 予約公開を使うか
-    # ★追加：最初の動画だけ「投稿時刻指定型」にする
-    # "fixed_time" なら 1本目は FIRST_PUBLISH_TIME_JST の「次の到来時刻」に予約。
-    # 2本目以降は、その1本目の時刻を基準に INTERVAL_MIN でずらす（OFFSET_MODEに従う）
-    "FIRST_SCHEDULE_MODE": "fixed_time",  # "fixed_time" or "delay"
+    # 既定は delay: 1本目を「実行時刻+START_DELAY_MIN」、以降は INTERVAL_MIN 間隔。
+    "FIRST_SCHEDULE_MODE": "delay",  # "fixed_time" or "delay" or "sequence"
     "FIRST_PUBLISH_TIME_JST": "09:30",  # "HH:MM"（JST）
     "FIRST_TIME_BUFFER_MIN": 30,  # 1本目の固定時刻が「今+この分」より過去/近すぎるなら翌日に回す
-    "START_DELAY_MIN": 83,  # （FIRST_SCHEDULE_MODE="delay" のときに有効）1本目は「今から何分後」
+    "START_DELAY_MIN": 60,  # （FIRST_SCHEDULE_MODE="delay" のときに有効）1本目は「今から何分後」
     "INTERVAL_MIN": 60,  # 2本目以降、何分刻みでずらす
     "OFFSET_MODE": "by_index",  # "by_index"（idx*interval） / "fixed"（全て同じ時刻）
     "FORCE_RESCHEDULE": False,  # DBにpublish_atがあっても上書きするか
     "RESCHEDULE_IF_PAST": True,  # publish_at_utc が過去なら自動で未来に再設定するか
     "MIN_FUTURE_BUFFER_MIN": 10,  # 再設定するなら「最低でも今から何分後」にするか
+    "SCHEDULE_SEQUENCE_HOURS": "6,18,7,19,8,20,9,21",  # 8本想定の交互時刻
+    "BLOCKED_HOUR_RANGES": "1-5,11-15",  # 投稿禁止時間帯（開始含む, 終了含まない）
+    "ALIGN_FIRST_TO_HOUR": False,  # 1本目を hh:00 にそろえる
+    "QUIET_HOURS_START": 1,  # 1:00以上
+    "QUIET_HOURS_END": 5,  # 5:00未満は予約しない（1:00-4:59を回避）
     # --- youtube upload meta defaults ---
     "CATEGORY_ID": "22",
     "NOTIFY_SUBSCRIBERS": False,
@@ -747,6 +750,124 @@ def compute_first_fixed_time(base_now_jst: datetime) -> datetime:
     return candidate
 
 
+def _parse_sequence_hours(raw: str) -> List[int]:
+    vals: List[int] = []
+    for p in str(raw or "").split(","):
+        t = p.strip()
+        if not t:
+            continue
+        hh = int(t)
+        if not (0 <= hh <= 23):
+            raise ValueError(f"invalid sequence hour: {hh}")
+        vals.append(hh)
+    if not vals:
+        raise ValueError("SCHEDULE_SEQUENCE_HOURS is empty")
+    return vals
+
+
+def _parse_blocked_hour_ranges(raw: str) -> List[Tuple[int, int]]:
+    out: List[Tuple[int, int]] = []
+    txt = str(raw or "").strip()
+    if not txt:
+        return out
+    for part in txt.split(","):
+        p = part.strip()
+        if not p:
+            continue
+        m = re.fullmatch(r"(\d{1,2})\s*-\s*(\d{1,2})", p)
+        if not m:
+            raise ValueError(f"invalid BLOCKED_HOUR_RANGES part: {p!r}")
+        start = int(m.group(1)) % 24
+        end = int(m.group(2)) % 24
+        if start == end:
+            continue
+        out.append((start, end))
+    return out
+
+
+def _is_in_blocked_hour(hour: int, ranges: List[Tuple[int, int]]) -> bool:
+    for start, end in ranges:
+        if start < end:
+            if start <= hour < end:
+                return True
+        else:
+            if hour >= start or hour < end:
+                return True
+    return False
+
+
+def _ceil_to_hour(dt_jst: datetime) -> datetime:
+    if dt_jst.minute == 0 and dt_jst.second == 0 and dt_jst.microsecond == 0:
+        return dt_jst
+    return (dt_jst + timedelta(hours=1)).replace(
+        minute=0, second=0, microsecond=0
+    )
+
+
+def _shift_to_allowed_time(
+    dt_jst: datetime, ranges: List[Tuple[int, int]], keep_minute: bool
+) -> datetime:
+    out = dt_jst
+    for _ in range(16):
+        if not _is_in_blocked_hour(out.hour, ranges):
+            return out
+        moved = False
+        for start, end in ranges:
+            hit = (
+                (start < end and start <= out.hour < end)
+                or (start > end and (out.hour >= start or out.hour < end))
+            )
+            if not hit:
+                continue
+            if start < end:
+                out = out.replace(hour=end, minute=0, second=0, microsecond=0)
+            else:
+                if out.hour >= start:
+                    out = (out + timedelta(days=1)).replace(
+                        hour=end, minute=0, second=0, microsecond=0
+                    )
+                else:
+                    out = out.replace(hour=end, minute=0, second=0, microsecond=0)
+            moved = True
+            break
+        if not moved:
+            break
+    if keep_minute:
+        return out
+    return out.replace(minute=0, second=0, microsecond=0)
+
+
+def _compute_sequence_time(base_now_jst: datetime, idx0: int) -> datetime:
+    """
+    例: 6,18,7,19,... の順序を保持した「次の予約時刻列」を作る。
+    先頭は now + FIRST_TIME_BUFFER_MIN 以降の最初のスロット。
+    """
+    seq_hours = _parse_sequence_hours(str(CFG.get("SCHEDULE_SEQUENCE_HOURS", "")))
+    min_buf = int(CFG.get("FIRST_TIME_BUFFER_MIN", 10))
+    threshold = base_now_jst + timedelta(minutes=min_buf)
+    need_n = idx0 + 1
+
+    out: List[datetime] = []
+    cursor = base_now_jst.replace(hour=0, minute=0, second=0, microsecond=0)
+    prev_dt: Optional[datetime] = None
+    guard = 0
+    while len(out) < need_n:
+        for hh in seq_hours:
+            dt = cursor.replace(hour=hh, minute=0, second=0, microsecond=0)
+            if prev_dt is not None and dt <= prev_dt:
+                dt = dt + timedelta(days=1)
+            if dt >= threshold:
+                out.append(dt)
+                if len(out) >= need_n:
+                    break
+            prev_dt = dt
+        cursor = cursor + timedelta(days=1)
+        guard += 1
+        if guard > 60:
+            raise RuntimeError("failed to build schedule sequence")
+    return out[idx0]
+
+
 def compute_publish_time(
     base_now_jst: datetime, idx0: int, first_anchor_jst: Optional[datetime]
 ) -> Tuple[str, str]:
@@ -762,8 +883,24 @@ def compute_publish_time(
 
     interval = int(CFG["INTERVAL_MIN"])
     mode = str(CFG["OFFSET_MODE"])
+    blocked_ranges = _parse_blocked_hour_ranges(CFG.get("BLOCKED_HOUR_RANGES", ""))
+    # 旧設定との後方互換
+    if not blocked_ranges:
+        quiet_start = int(CFG.get("QUIET_HOURS_START", 1))
+        quiet_end = int(CFG.get("QUIET_HOURS_END", 5))
+        if quiet_start != quiet_end:
+            blocked_ranges = [(quiet_start % 24, quiet_end % 24)]
 
     first_mode = str(CFG.get("FIRST_SCHEDULE_MODE", "delay")).strip().lower()
+
+    if first_mode == "sequence":
+        dt_jst = _shift_to_allowed_time(
+            _compute_sequence_time(base_now_jst, idx0),
+            blocked_ranges,
+            keep_minute=False,
+        )
+        dt_utc = dt_jst.astimezone(UTC)
+        return to_rfc3339_utc(dt_utc), to_jst_human(dt_jst)
 
     # 1本目を固定時刻にする場合
     if first_mode == "fixed_time" and first_anchor_jst is not None:
@@ -772,6 +909,7 @@ def compute_publish_time(
         else:
             # by_index: idx0*interval
             dt_jst = first_anchor_jst + timedelta(minutes=interval * idx0)
+        dt_jst = _shift_to_allowed_time(dt_jst, blocked_ranges, keep_minute=False)
         dt_utc = dt_jst.astimezone(UTC)
         return to_rfc3339_utc(dt_utc), to_jst_human(dt_jst)
 
@@ -783,7 +921,12 @@ def compute_publish_time(
     elif mode == "fixed":
         offset = start_delay
 
-    dt_jst = base_now_jst + timedelta(minutes=offset)
+    if bool(CFG.get("ALIGN_FIRST_TO_HOUR", False)):
+        first_anchor = _ceil_to_hour(base_now_jst) + timedelta(minutes=start_delay)
+        dt_jst = first_anchor + timedelta(minutes=interval * idx0)
+    else:
+        dt_jst = base_now_jst + timedelta(minutes=offset)
+    dt_jst = _shift_to_allowed_time(dt_jst, blocked_ranges, keep_minute=True)
     dt_utc = dt_jst.astimezone(UTC)
     return to_rfc3339_utc(dt_utc), to_jst_human(dt_jst)
 
@@ -813,8 +956,25 @@ def main() -> int:
         "--first_schedule_mode",
         type=str,
         default=None,
-        choices=["fixed_time", "delay"],
+        choices=["fixed_time", "delay", "sequence"],
         help="1本目の方式",
+    )
+    ap.add_argument(
+        "--schedule_sequence_hours",
+        type=str,
+        default=None,
+        help="sequenceモード用の時刻列(時のみ, カンマ区切り)。例: 6,18,7,19,8,20,9,21",
+    )
+    ap.add_argument(
+        "--blocked_hour_ranges",
+        type=str,
+        default=None,
+        help="投稿禁止時間帯（開始-終了, 終了は含まない）。例: 25-29,11-15",
+    )
+    ap.add_argument(
+        "--align_first_to_hour",
+        action="store_true",
+        help="1本目を hh:00 に丸める（delayモード時）",
     )
     ap.add_argument(
         "--first_time_buffer_min",
@@ -848,6 +1008,12 @@ def main() -> int:
         CFG["FIRST_SCHEDULE_MODE"] = str(args.first_schedule_mode)
     if args.first_time_buffer_min is not None:
         CFG["FIRST_TIME_BUFFER_MIN"] = int(args.first_time_buffer_min)
+    if args.schedule_sequence_hours is not None:
+        CFG["SCHEDULE_SEQUENCE_HOURS"] = str(args.schedule_sequence_hours)
+    if args.blocked_hour_ranges is not None:
+        CFG["BLOCKED_HOUR_RANGES"] = str(args.blocked_hour_ranges)
+    if args.align_first_to_hour:
+        CFG["ALIGN_FIRST_TO_HOUR"] = True
 
     if args.no_thumbnail:
         CFG["THUMBNAIL_ENABLED"] = False
@@ -875,6 +1041,9 @@ def main() -> int:
     print(f"[CONF] FIRST_SCHEDULE_MODE : {CFG.get('FIRST_SCHEDULE_MODE')}")
     print(f"[CONF] FIRST_PUBLISH_TIME_JST : {CFG.get('FIRST_PUBLISH_TIME_JST')}")
     print(f"[CONF] FIRST_TIME_BUFFER_MIN : {CFG.get('FIRST_TIME_BUFFER_MIN')}")
+    print(f"[CONF] SCHEDULE_SEQUENCE_HOURS : {CFG.get('SCHEDULE_SEQUENCE_HOURS')}")
+    print(f"[CONF] BLOCKED_HOUR_RANGES : {CFG.get('BLOCKED_HOUR_RANGES')}")
+    print(f"[CONF] ALIGN_FIRST_TO_HOUR : {CFG.get('ALIGN_FIRST_TO_HOUR')}")
     print(f"[CONF] START_DELAY_MIN  : {CFG['START_DELAY_MIN']}")
     print(f"[CONF] INTERVAL_MIN     : {CFG['INTERVAL_MIN']}")
     print(f"[CONF] OFFSET_MODE      : {CFG['OFFSET_MODE']}")

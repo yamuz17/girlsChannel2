@@ -304,11 +304,11 @@ def pick_one_stage_id(con: sqlite3.Connection, stage: int) -> Optional[str]:
     # 02は folder_name 未生成なので folder_name 条件は付けない
     order_sql = "id DESC"
     if PICK_ORDER_02 == "post_date_desc":
-        order_sql = "last_post_at DESC, id DESC"
+        order_sql = "last_post_at DESC, COALESCE(hot_score_d,0) DESC, id DESC"
     elif PICK_ORDER_02 == "comments_desc":
         order_sql = "comments_count DESC, last_post_at DESC, id DESC"
     elif PICK_ORDER_02 == "hot_score_desc":
-        order_sql = "hot_score_d DESC, last_post_at DESC, id DESC"
+        order_sql = "COALESCE(hot_score_d,0) DESC, last_post_at DESC, id DESC"
 
     row = con.execute(
         f"SELECT id FROM {TABLE_NAME} WHERE stage=? AND COALESCE(skip,0)=0 ORDER BY {order_sql} LIMIT 1",

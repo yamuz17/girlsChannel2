@@ -125,7 +125,7 @@ CFG = Config(
     or "assemble_video.py",
     SCRIPT_SCHEDULE_NAME=_env_str("SCRIPT_SCHEDULE_NAME", "投稿予約.py")
     or "投稿予約.py",
-    RUNS_DEFAULT=_env_int("RUNS_DEFAULT", 1),
+    RUNS_DEFAULT=_env_int("RUNS_DEFAULT", 8),
     STOP_ON_ERROR=_env_bool("STOP_ON_ERROR", False),
     RESET_TO_ZERO_ON_FAIL_02=_env_bool("RESET_TO_ZERO_ON_FAIL_02", False),
     SLEEP_SEC_WHEN_EMPTY=float(_env_float("SLEEP_SEC_WHEN_EMPTY", 0.0)),

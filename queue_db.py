@@ -230,11 +230,11 @@ def pick_one(
     """
     order_sql = "id DESC"
     if pick_order == "post_date_desc":
-        order_sql = "last_post_at DESC, id DESC"
+        order_sql = "last_post_at DESC, COALESCE(hot_score_d,0) DESC, id DESC"
     elif pick_order == "comments_desc":
         order_sql = "comments_count DESC, last_post_at DESC, id DESC"
     elif pick_order == "hot_score_desc":
-        order_sql = "hot_score_d DESC, last_post_at DESC, id DESC"
+        order_sql = "COALESCE(hot_score_d,0) DESC, last_post_at DESC, id DESC"
 
     row = con.execute(
         f"""

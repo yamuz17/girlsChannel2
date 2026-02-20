@@ -196,7 +196,7 @@ def pick_one(con: sqlite3.Connection) -> Optional[sqlite3.Row]:
     # folder_name 必須（99は素材フォルダ前提）
     order_sql = "id DESC"
     if PICK_ORDER_99 == "post_date_desc":
-        order_sql = "last_post_at DESC, id DESC"
+        order_sql = "last_post_at DESC, COALESCE(hot_score_d,0) DESC, id DESC"
     elif PICK_ORDER_99 == "comments_desc":
         cols_lower = {
             str(r[1]).lower()
@@ -207,7 +207,7 @@ def pick_one(con: sqlite3.Connection) -> Optional[sqlite3.Row]:
         else:
             order_sql = "id DESC"
     elif PICK_ORDER_99 == "hot_score_desc":
-        order_sql = "hot_score_d DESC, last_post_at DESC, id DESC"
+        order_sql = "COALESCE(hot_score_d,0) DESC, last_post_at DESC, id DESC"
 
     sql = f"""
         SELECT *

@@ -44,8 +44,8 @@ TABLE_NAME = env_str("TABLE_NAME", "items") or "items"
 PAGE_FROM = int(env_str("PAGE_FROM", "1"))
 PAGE_TO = int(env_str("PAGE_TO", "15"))
 
-TARGET_NEW_COUNT = int(env_str("TARGET_NEW_COUNT", "1000"))
-MIN_COMMENTS = int(env_str("MIN_COMMENTS", "1000"))
+TARGET_NEW_COUNT = int(env_str("TARGET_NEW_COUNT", "800"))
+MIN_COMMENTS = int(env_str("MIN_COMMENTS", "800"))
 UPDATE_EXISTING = env_str("UPDATE_EXISTING", "false").lower() in (
     "1",
     "true",
@@ -90,6 +90,10 @@ HOTNESS_ENABLE = env_str("HOTNESS_ENABLE", "true").lower() in (
     "y",
     "on",
 )
+HOT_SCORE_CATEGORY_MULTIPLIER_DEFAULT = 1.0
+HOT_SCORE_CATEGORY_MULTIPLIERS: Dict[str, float] = {
+    "ゴシップ": 1.2,
+}
 
 DETAIL_TIMEOUT_MS = int(env_str("DETAIL_TIMEOUT_MS", "12000"))
 DETAIL_TEXT_TIMEOUT_MS = int(env_str("DETAIL_TEXT_TIMEOUT_MS", "3000"))
@@ -260,6 +264,15 @@ def connect(db_path: Path) -> sqlite3.Connection:
     con.execute("PRAGMA journal_mode=WAL;")
     con.execute("PRAGMA synchronous=NORMAL;")
     con.executescript(DDL_ITEMS)
+    con.create_function(
+        "category_multiplier",
+        1,
+        lambda category: float(
+            HOT_SCORE_CATEGORY_MULTIPLIERS.get(
+                str(category or ""), HOT_SCORE_CATEGORY_MULTIPLIER_DEFAULT
+            )
+        ),
+    )
     con.commit()
     return con
 
@@ -394,9 +407,11 @@ def recompute_hot_scores(con: sqlite3.Connection) -> None:
                         julianday(date(REPLACE(substr(first_post_at,1,10),'/','-')))) + 1
                      ) <= 0 THEN NULL
                      ELSE ROUND(
-                       (comments_count * 1.0) /
-                       ((julianday(date(REPLACE(substr(last_post_at,1,10),'/','-'))) -
-                         julianday(date(REPLACE(substr(first_post_at,1,10),'/','-')))) + 1),
+                       (
+                         (comments_count * 1.0) /
+                         ((julianday(date(REPLACE(substr(last_post_at,1,10),'/','-'))) -
+                           julianday(date(REPLACE(substr(first_post_at,1,10),'/','-')))) + 1)
+                       ) * category_multiplier(category),
                        2
                      )
                    END

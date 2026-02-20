@@ -363,17 +363,18 @@ def run_ffmpeg(cmd: List[str], log_path: Path) -> None:
 def pick_latest_mp3(start_dir: Path, fixed_name: str) -> Path:
     if fixed_name:
         p = start_dir / fixed_name
+        # fixed_name が "." などでディレクトリを指す事故を防ぐ
         if not p.exists():
             raise FileNotFoundError(f"mp3 not found: {p}")
+        if not p.is_file() or p.suffix.lower() != ".mp3":
+            raise FileNotFoundError(f"mp3 file not found: {p}")
         return p
     # よくある固定名を優先
-    for name in ("Start.mp3", "Start .mp3"):
+    for name in ("start.mp3", "Start.mp3", "Start .mp3"):
         p = start_dir / name
-        if p.exists():
+        if p.exists() and p.is_file():
             return p
-    mp3s = sorted(
-        start_dir.glob("*.mp3"), key=lambda p: p.stat().st_mtime, reverse=True
-    )
+    mp3s = sorted((p for p in start_dir.glob("*.mp3") if p.is_file()), key=lambda p: p.stat().st_mtime, reverse=True)
     if not mp3s:
         raise FileNotFoundError(f"no mp3 found in: {start_dir}")
     return mp3s[0]
@@ -507,6 +508,8 @@ def main() -> int:
         f"[INFO] table={CFG.table} STA_05={STA_05} END_05={END_05} order={PICK_ORDER}"
     )
     print(f"[INFO] BASE_OUTPUT_ROOT: {BASE_OUTPUT_ROOT}")
+    print(f"[INFO] START_DIR: {START_DIR}")
+    print(f"[INFO] START_MP3_NAME: {START_MP3_NAME!r}")
 
     ensure_tools()
 
