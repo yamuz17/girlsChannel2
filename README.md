@@ -12,6 +12,7 @@
 source .venv/bin/activate
 python scripts/pipeline/build_list.py
 python scripts/pipeline/run_pipeline.py
+python scripts/pipeline/youtube_history_sync.py --limit 300
 python scripts/steps/post_upload.py
 ```
 
@@ -29,7 +30,7 @@ python scripts/steps/post_upload.py
 ## 新仕様（採用方針）
 
 ### テーブル構成
-- テーブルは `items_do` と `items_done` の2つに分割する。
+- テーブルは `items_do` / `items_done` / `youtube_history` を使う。
 
 `items_do` カラム:
 - `id`
@@ -58,10 +59,22 @@ python scripts/steps/post_upload.py
 - `tiktok_publish_at`
 - `folder_delite_at`
 
+`youtube_history` カラム:
+- `id`（トピックID）
+- `youtube_video_id`
+- `youtube_uploaded_at`
+- `upload_youtube_at`
+- `publish_at_utc`
+- `publish_at_jst`
+- `source_table`
+- `first_detected_at`
+- `last_synced_at`
+
 ### アイテム選択ロジック（run_pipeline）
 - `items_do` を参照する。
 - 並び順は `hot_score` 降順、同点時に `list_add_at` の新しい順。
 - `skip=0` のみ対象。
+- `youtube_history` に `id` があるものは除外する（過去に作成/投稿済み）。
 - 上から順に、`run_pipeline` が今回生成する動画本数分を選択する。
 - 選択したアイテムは `items_done` に追加して処理管理する。
 

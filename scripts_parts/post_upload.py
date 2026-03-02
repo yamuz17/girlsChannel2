@@ -25,19 +25,20 @@ if str(REPO_ROOT) not in sys.path:
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
+from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 
 from core import env_loader
-from core.config import CFG
+from core.config import CFG as CORE_CFG
 
 # .env / config.local.json を読み込み
 _ENV_PATH = env_loader.load_env()
-_DB_PATH = CFG.DB_PATH
+_DB_PATH = CORE_CFG.DB_PATH
 if not _DB_PATH:
     raise SystemExit("DB_PATH が未設定です（girlsChannel.env を確認してください）")
-_BASE_OUTPUT_ROOT = CFG.BASE_OUTPUT_ROOT
+_BASE_OUTPUT_ROOT = CORE_CFG.BASE_OUTPUT_ROOT
 if not _BASE_OUTPUT_ROOT:
     raise SystemExit(
         "BASE_OUTPUT_ROOT が未設定です（girlsChannel.env を確認してください）"
@@ -49,12 +50,22 @@ if not _BASE_OUTPUT_ROOT:
 CFG = {
     # --- DB / paths ---
     "DB_PATH": str(_DB_PATH),
-    "TABLE_NAME": "items",
+    "TABLE_NAME": (
+        env_loader.env_str(
+            "UPLOAD_TABLE_NAME",
+            CORE_CFG.ITEMS_DONE_TABLE or CORE_CFG.TABLE_NAME or "items_done",
+        )
+        or "items_done"
+    ),
+    "YOUTUBE_HISTORY_TABLE": (
+        env_loader.env_str("YOUTUBE_HISTORY_TABLE", "youtube_history").strip()
+        or "youtube_history"
+    ),
     "BASE_OUTPUT_ROOT": str(_BASE_OUTPUT_ROOT),
-    "API_DIR": str(CFG.API_DIR or (_BASE_OUTPUT_ROOT / "api")),
+    "API_DIR": str(CORE_CFG.API_DIR or (_BASE_OUTPUT_ROOT / "api")),
     # "CLIENT_JSON_NAME": "client_secrets.json",  # .json無し指定でも自動補正
-    "CLIENT_JSON_NAME": CFG.CLIENT_JSON_NAME,
-    "TOKEN_NAME": CFG.TOKEN_NAME,
+    "CLIENT_JSON_NAME": CORE_CFG.CLIENT_JSON_NAME,
+    "TOKEN_NAME": CORE_CFG.TOKEN_NAME,
     # --- pipeline statuses ---
     "READY_STAGE": 60,
     "UPLOADING_STAGE": 70,
@@ -229,6 +240,24 @@ def find_video_mp4(movie_dir: Path) -> Path:
     return mp4s_sorted[0]
 
 
+def resolve_parent_dir(base_root: Path, folder_name: str) -> Path:
+    """
+    BASE_OUTPUT_ROOT の運用差分を吸収する。
+    - 期待: <base>/<folder_name>
+    - 互換: <base>/movie/<folder_name>
+    """
+    c1 = base_root / folder_name
+    if c1.exists():
+        return c1
+
+    c2 = base_root / "movie" / folder_name
+    if c2.exists():
+        return c2
+
+    # どちらにも無い場合は既定位置を返す（呼び出し側で詳細エラー化）
+    return c1
+
+
 # =============================================================================
 # サムネ探索 & 設定（追加仕様：固定相対パス）
 # =============================================================================
@@ -321,6 +350,75 @@ def ensure_columns(con: sqlite3.Connection, table_name: str) -> None:
             con.execute(f"ALTER TABLE {table_name} ADD COLUMN {name} {ddl}")
         except sqlite3.OperationalError:
             pass
+    con.commit()
+
+
+def ensure_youtube_history_table(con: sqlite3.Connection, table_name: str) -> None:
+    con.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {table_name} (
+          id TEXT PRIMARY KEY,
+          youtube_video_id TEXT,
+          youtube_uploaded_at TEXT,
+          upload_youtube_at TEXT,
+          publish_at_utc TEXT,
+          publish_at_jst TEXT,
+          source_table TEXT,
+          first_detected_at TEXT NOT NULL,
+          last_synced_at TEXT NOT NULL
+        )
+        """
+    )
+    con.execute(
+        f"CREATE INDEX IF NOT EXISTS idx_{table_name}_video_id ON {table_name}(youtube_video_id)"
+    )
+    con.commit()
+
+
+def upsert_youtube_history(
+    con: sqlite3.Connection,
+    history_table: str,
+    source_table: str,
+    job_id: str,
+    video_id: str,
+    uploaded_at: str,
+    publish_at_utc: str,
+    publish_at_jst: str,
+) -> None:
+    con.execute(
+        f"""
+        INSERT INTO {history_table} (
+          id,
+          youtube_video_id,
+          youtube_uploaded_at,
+          upload_youtube_at,
+          publish_at_utc,
+          publish_at_jst,
+          source_table,
+          first_detected_at,
+          last_synced_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          youtube_video_id = COALESCE(NULLIF(excluded.youtube_video_id,''), {history_table}.youtube_video_id),
+          youtube_uploaded_at = COALESCE(NULLIF(excluded.youtube_uploaded_at,''), {history_table}.youtube_uploaded_at),
+          upload_youtube_at = COALESCE(NULLIF(excluded.upload_youtube_at,''), {history_table}.upload_youtube_at),
+          publish_at_utc = COALESCE(NULLIF(excluded.publish_at_utc,''), {history_table}.publish_at_utc),
+          publish_at_jst = COALESCE(NULLIF(excluded.publish_at_jst,''), {history_table}.publish_at_jst),
+          source_table = COALESCE(NULLIF(excluded.source_table,''), {history_table}.source_table),
+          last_synced_at = excluded.last_synced_at
+        """,
+        (
+            str(job_id),
+            str(video_id or ""),
+            str(uploaded_at or ""),
+            str(uploaded_at or ""),
+            str(publish_at_utc or ""),
+            str(publish_at_jst or ""),
+            str(source_table or ""),
+            str(uploaded_at or now_jst_str()),
+            str(uploaded_at or now_jst_str()),
+        ),
+    )
     con.commit()
 
 
@@ -494,8 +592,15 @@ def set_publish_at(
 
 
 def mark_done(
-    con: sqlite3.Connection, table_name: str, job_id: str, video_id: str
+    con: sqlite3.Connection,
+    table_name: str,
+    history_table: str,
+    job_id: str,
+    video_id: str,
+    publish_at_utc: str = "",
+    publish_at_jst: str = "",
 ) -> None:
+    uploaded_at = now_jst_str()
     con.execute(
         f"""
         UPDATE {table_name}
@@ -509,15 +614,25 @@ def mark_done(
         """,
         (
             CFG["DONE_STAGE"],
-            now_jst_str(),
+            uploaded_at,
             video_id,
-            now_jst_str(),
+            uploaded_at,
             "uploaded",
             None,
             job_id,
         ),
     )
     con.commit()
+    upsert_youtube_history(
+        con=con,
+        history_table=history_table,
+        source_table=table_name,
+        job_id=job_id,
+        video_id=video_id,
+        uploaded_at=uploaded_at,
+        publish_at_utc=publish_at_utc,
+        publish_at_jst=publish_at_jst,
+    )
 
 
 def mark_fail_back(
@@ -552,6 +667,16 @@ def http_error_to_text(e: HttpError) -> str:
 def get_authenticated_service(client_secrets_file: Path, token_file: Path) -> Any:
     client_secrets_file = resolve_client_secrets_path(client_secrets_file)
 
+    def run_oauth_flow() -> Credentials:
+        log("[AUTH] starting browser OAuth flow...")
+        flow = InstalledAppFlow.from_client_secrets_file(
+            str(client_secrets_file), CFG["SCOPES"]
+        )
+        creds_new = flow.run_local_server(port=0, open_browser=True)
+        token_file.parent.mkdir(parents=True, exist_ok=True)
+        token_file.write_text(creds_new.to_json(), encoding="utf-8")
+        return creds_new
+
     creds: Optional[Credentials] = None
     if token_file.exists():
         creds = Credentials.from_authorized_user_file(str(token_file), CFG["SCOPES"])
@@ -559,16 +684,20 @@ def get_authenticated_service(client_secrets_file: Path, token_file: Path) -> An
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             log("[AUTH] refreshing token...")
-            creds.refresh(Request())
+            try:
+                creds.refresh(Request())
+            except RefreshError as e:
+                # 既存 token の scope と現在設定が不一致の時は再認証へフォールバック
+                eprint(
+                    f"[WARN] token refresh failed ({type(e).__name__}): {e} -> reauth"
+                )
+                creds = run_oauth_flow()
         else:
-            log("[AUTH] starting browser OAuth flow...")
-            flow = InstalledAppFlow.from_client_secrets_file(
-                str(client_secrets_file), CFG["SCOPES"]
-            )
-            creds = flow.run_local_server(port=0, open_browser=True)
+            creds = run_oauth_flow()
 
-        token_file.parent.mkdir(parents=True, exist_ok=True)
-        token_file.write_text(creds.to_json(), encoding="utf-8")
+        if creds and creds.valid:
+            token_file.parent.mkdir(parents=True, exist_ok=True)
+            token_file.write_text(creds.to_json(), encoding="utf-8")
 
     return build("youtube", "v3", credentials=creds)
 
@@ -1059,6 +1188,7 @@ def main() -> int:
     try:
         step(1, "ensure_columns")
         ensure_columns(con, table_name)
+        ensure_youtube_history_table(con, CFG["YOUTUBE_HISTORY_TABLE"])
 
         step(2, "build youtube service (OAuth)")
         yt = get_authenticated_service(client_secrets, token_file)
@@ -1163,7 +1293,7 @@ def main() -> int:
                     log("[SCHEDULE] disabled")
 
                 # パス解決
-                parent_dir = base_root / job.folder_name
+                parent_dir = resolve_parent_dir(base_root, job.folder_name)
                 movie_dir = parent_dir / CFG["MOVIE_SUBDIR"]
                 video_path = find_video_mp4(movie_dir)
 
@@ -1253,7 +1383,15 @@ def main() -> int:
                     set_thumb_status(con, table_name, job.id, "disabled")
 
                 # done
-                mark_done(con, table_name, job.id, video_id)
+                mark_done(
+                    con,
+                    table_name,
+                    CFG["YOUTUBE_HISTORY_TABLE"],
+                    job.id,
+                    video_id,
+                    publish_at_utc=publish_at_utc,
+                    publish_at_jst=publish_at_jst,
+                )
                 log(
                     f"[OK] uploaded id={job.id} videoId={video_id} publish_at_jst={publish_at_jst}"
                 )

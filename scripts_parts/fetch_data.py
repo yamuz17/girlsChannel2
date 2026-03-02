@@ -149,8 +149,8 @@ FOLDER_TITLE_MAX_CHARS = env_loader.env_int("FOLDER_TITLE_MAX_CHARS", 10)
 ENABLE_DEPLOY_SKIP_IF_SHORTAGE = env_loader.env_bool(
     "ENABLE_DEPLOY_SKIP_IF_SHORTAGE", True
 )
-REQUIRE_TOTAL_N = env_loader.env_int("REQUIRE_TOTAL_N", 10)
-REQUIRE_RATIO_N = env_loader.env_int("REQUIRE_RATIO_N", 10)
+REQUIRE_TOTAL_N = env_loader.env_int("REQUIRE_TOTAL_N", 12)
+REQUIRE_RATIO_N = env_loader.env_int("REQUIRE_RATIO_N", 12)
 
 # NGワード
 ENABLE_EXCLUDE_BADWORDS = env_loader.env_bool("ENABLE_EXCLUDE_BADWORDS", True)
@@ -181,8 +181,8 @@ BADWORDS = env_list_csv("BADWORDS_CSV", BADWORDS_DEFAULT)
 BADWORDS_NORMALIZE = env_loader.env_bool("BADWORDS_NORMALIZE", True)
 
 # ランキング（ここはコード調整寄り）
-TOP_N_TOTAL = 10
-TOP_N_RATIO = 10
+TOP_N_TOTAL = env_loader.env_int("TOP_N_TOTAL", 12)
+TOP_N_RATIO = env_loader.env_int("TOP_N_RATIO", 12)
 RANKING_EXTRA_CANDIDATES = 20
 RATIO_THRESHOLD = 0.8
 MIN_TOTAL_VOTES = 5

@@ -9,6 +9,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+import re
 from typing import List, Optional
 from zoneinfo import ZoneInfo
 
@@ -34,6 +35,10 @@ if not DB_PATH:
 # 入力/進捗管理テーブル名
 ITEMS_DO_TABLE = CFG.ITEMS_DO_TABLE or "items_do"
 ITEMS_DONE_TABLE = CFG.ITEMS_DONE_TABLE or "items_done"
+YOUTUBE_HISTORY_TABLE = (
+    env_loader.env_str("YOUTUBE_HISTORY_TABLE", "youtube_history").strip()
+    or "youtube_history"
+)
 
 # スクリプト配置
 SCRIPTS_DONE_DIR = Path(__file__).resolve().parent
@@ -56,6 +61,7 @@ PASS_FOLDER_NAME_TO_05 = CFG.PASS_FOLDER_NAME_TO_05
 RUN_STEPS_RAW = (env_loader.env_str("RUN_STEPS", "pipeline") or "pipeline").strip()
 PIPELINE_UNTIL_RAW = (env_loader.env_str("PIPELINE_UNTIL", "99") or "99").strip()
 MAX_PIPELINE_CYCLES = int(env_loader.env_int("MAX_PIPELINE_CYCLES", 0))
+POST_TITLE_MAX_CHARS = int(env_loader.env_int("POST_TITLE_MAX_CHARS", 95))
 
 # ステージ番号
 STA_02 = CFG.STA_02
@@ -193,6 +199,21 @@ def ensure_tables(con: sqlite3.Connection) -> None:
         )
         """
     )
+    con.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {YOUTUBE_HISTORY_TABLE} (
+          id TEXT PRIMARY KEY,
+          youtube_video_id TEXT,
+          youtube_uploaded_at TEXT,
+          upload_youtube_at TEXT,
+          publish_at_utc TEXT,
+          publish_at_jst TEXT,
+          source_table TEXT,
+          first_detected_at TEXT NOT NULL,
+          last_synced_at TEXT NOT NULL
+        )
+        """
+    )
 
     cols = {r[1] for r in con.execute(f"PRAGMA table_info({ITEMS_DONE_TABLE})").fetchall()}
     if "upload_youtube_at" not in cols:
@@ -206,6 +227,9 @@ def ensure_tables(con: sqlite3.Connection) -> None:
     con.execute(
         f"CREATE INDEX IF NOT EXISTS idx_{ITEMS_DONE_TABLE}_stage ON {ITEMS_DONE_TABLE}(stage, skip, id DESC)"
     )
+    con.execute(
+        f"CREATE INDEX IF NOT EXISTS idx_{YOUTUBE_HISTORY_TABLE}_video_id ON {YOUTUBE_HISTORY_TABLE}(youtube_video_id)"
+    )
     con.commit()
 
 
@@ -214,6 +238,99 @@ def _pick_expr(cols: set[str], candidates: List[str], default_expr: str) -> str:
         if c in cols:
             return c
     return default_expr
+
+
+def _pick_col(cols: set[str], candidates: List[str]) -> Optional[str]:
+    for c in candidates:
+        if c in cols:
+            return c
+    return None
+
+
+def sync_youtube_history_from_items_done(con: sqlite3.Connection) -> int:
+    cols = {str(r[1]) for r in con.execute(f"PRAGMA table_info({ITEMS_DONE_TABLE})").fetchall()}
+    if "id" not in cols:
+        return 0
+
+    yt_id_col = _pick_col(
+        cols,
+        ["youtube_video_id", "YouTubeVideoId", "youtubeVideoId"],
+    )
+    uploaded_col = _pick_col(cols, ["youtube_uploaded_at"])
+    upload_col = _pick_col(cols, ["upload_youtube_at", "youtube_upload_at"])
+    publish_utc_col = _pick_col(cols, ["publish_at_utc"])
+    publish_jst_col = _pick_col(cols, ["publish_at_jst"])
+    created_col = _pick_col(cols, ["video_created_at", "list_add_at"])
+    has_stage = "stage" in cols
+
+    yt_id_expr = f"COALESCE({yt_id_col}, '')" if yt_id_col else "''"
+    uploaded_expr = f"COALESCE({uploaded_col}, '')" if uploaded_col else "''"
+    upload_expr = f"COALESCE({upload_col}, '')" if upload_col else "''"
+    publish_utc_expr = f"COALESCE({publish_utc_col}, '')" if publish_utc_col else "''"
+    publish_jst_expr = f"COALESCE({publish_jst_col}, '')" if publish_jst_col else "''"
+
+    now = now_jst_str()
+    created_expr = f"COALESCE(NULLIF({created_col},''), ?)" if created_col else "?"
+
+    where_parts: List[str] = []
+    if yt_id_col:
+        where_parts.append(f"COALESCE({yt_id_col},'') != ''")
+    if uploaded_col:
+        where_parts.append(f"COALESCE({uploaded_col},'') != ''")
+    if upload_col:
+        where_parts.append(f"COALESCE({upload_col},'') != ''")
+    if created_col:
+        where_parts.append(f"COALESCE({created_col},'') != ''")
+    if has_stage:
+        where_parts.append("stage = ?")
+
+    if not where_parts:
+        return 0
+
+    params: List[object] = [ITEMS_DONE_TABLE, now, now]
+    if has_stage:
+        params.append(int(END_99))
+
+    con.execute(
+        f"""
+        INSERT INTO {YOUTUBE_HISTORY_TABLE} (
+          id,
+          youtube_video_id,
+          youtube_uploaded_at,
+          upload_youtube_at,
+          publish_at_utc,
+          publish_at_jst,
+          source_table,
+          first_detected_at,
+          last_synced_at
+        )
+        SELECT
+          id,
+          {yt_id_expr},
+          {uploaded_expr},
+          {upload_expr},
+          {publish_utc_expr},
+          {publish_jst_expr},
+          ?,
+          {created_expr},
+          ?
+          FROM {ITEMS_DONE_TABLE}
+         WHERE COALESCE(id,'') != ''
+           AND ({' OR '.join(where_parts)})
+        ON CONFLICT(id) DO UPDATE SET
+          youtube_video_id = COALESCE(NULLIF(excluded.youtube_video_id,''), {YOUTUBE_HISTORY_TABLE}.youtube_video_id),
+          youtube_uploaded_at = COALESCE(NULLIF(excluded.youtube_uploaded_at,''), {YOUTUBE_HISTORY_TABLE}.youtube_uploaded_at),
+          upload_youtube_at = COALESCE(NULLIF(excluded.upload_youtube_at,''), {YOUTUBE_HISTORY_TABLE}.upload_youtube_at),
+          publish_at_utc = COALESCE(NULLIF(excluded.publish_at_utc,''), {YOUTUBE_HISTORY_TABLE}.publish_at_utc),
+          publish_at_jst = COALESCE(NULLIF(excluded.publish_at_jst,''), {YOUTUBE_HISTORY_TABLE}.publish_at_jst),
+          source_table = COALESCE(NULLIF(excluded.source_table,''), {YOUTUBE_HISTORY_TABLE}.source_table),
+          last_synced_at = excluded.last_synced_at
+        """,
+        tuple(params),
+    )
+    n = con.execute(f"SELECT COUNT(*) AS n FROM {YOUTUBE_HISTORY_TABLE}").fetchone()
+    con.commit()
+    return int(n["n"] or 0) if n else 0
 
 
 def ensure_history_table(con: sqlite3.Connection) -> None:
@@ -301,7 +418,17 @@ def record_history(db_path: Path, h: HistoryRun) -> None:
 
 
 def build_post_title(raw: str) -> str:
+    s = re.sub(r"\s+", " ", (raw or "").strip()).strip()
+    if not s:
+        return "タイトルなし"
+    max_chars = POST_TITLE_MAX_CHARS if POST_TITLE_MAX_CHARS > 0 else 95
+    return s[:max_chars]
+
+
+def build_folder_title(raw: str) -> str:
     s = (raw or "").strip()
+    if not s:
+        return "タイトルなし"
     return s[:10]
 
 
@@ -372,10 +499,13 @@ def enqueue_from_items_do(con: sqlite3.Connection, limit: int) -> List[str]:
     rows = con.execute(
         f"""
         SELECT d.id, d.skip, d.category, d.title, d.list_add_at
-          FROM {ITEMS_DO_TABLE} d
+         FROM {ITEMS_DO_TABLE} d
          WHERE COALESCE(d.skip,0)=0
            AND NOT EXISTS (
                SELECT 1 FROM {ITEMS_DONE_TABLE} n WHERE n.id = d.id
+           )
+           AND NOT EXISTS (
+               SELECT 1 FROM {YOUTUBE_HISTORY_TABLE} y WHERE y.id = d.id
            )
          ORDER BY COALESCE(d.hot_score,0) DESC,
                   d.list_add_at DESC,
@@ -391,7 +521,8 @@ def enqueue_from_items_do(con: sqlite3.Connection, limit: int) -> List[str]:
         item_id = str(r["id"])
         title = str(r["title"] or "")
         post_title = build_post_title(title)
-        folder_name = f"{stamp}_{item_id}_{post_title}"
+        folder_title = build_folder_title(title)
+        folder_name = f"{stamp}_{item_id}_{folder_title}"
         url = f"https://girlschannel.net/topics/{item_id}/"
         cur = con.execute(
             f"""
@@ -515,6 +646,7 @@ def main() -> int:
     try:
         with connect(DB_PATH) as con:
             ensure_tables(con)
+            sync_youtube_history_from_items_done(con)
             if "pipeline" in steps:
                 target_ids = enqueue_from_items_do(con, target_video_count)
                 if not target_ids:

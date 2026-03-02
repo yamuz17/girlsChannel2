@@ -45,6 +45,7 @@ PICK_ORDER = (
 
 STA_03 = queue_db._env_int("STA_03", 2)
 END_03 = queue_db._env_int("END_03", 3)
+STA_02 = queue_db._env_int("STA_02", 1)
 
 # フォント（任意：; 区切り）
 JP_FONT_PATHS_ENV = queue_db._env_str("JP_FONT_PATHS", "").strip()
@@ -62,6 +63,7 @@ EMOJI_FONT_PATH = queue_db._env_str(
 # 入出力（フォルダ内）
 # =========================
 NDJSON_REL = Path("text/ranking_ratio_80_plus.ndjson")
+NDJSON_FALLBACK_REL = Path("text/ranking_total.ndjson")
 OUT_TITLE_REL = Path("image/title/title.png")
 OUT_COMMENT_REL_DIR = Path("image/comment")
 
@@ -124,6 +126,37 @@ def read_ndjson(path: Path) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
         raise ValueError("rank/text を持つ item が0件です")
 
     return meta, items
+
+
+def _read_ndjson_with_fallback(
+    primary_path: Path, fallback_path: Path
+) -> Tuple[Path, Dict[str, Any], List[Dict[str, Any]]]:
+    tried: List[str] = []
+    for path in (primary_path, fallback_path):
+        if not path.exists():
+            tried.append(f"missing: {path}")
+            continue
+        try:
+            meta, items = read_ndjson(path)
+            return path, meta, items
+        except ValueError as e:
+            tried.append(f"invalid: {path} ({e})")
+            continue
+    raise FileNotFoundError(" / ".join(tried) if tried else f"入力が見つかりません: {primary_path}")
+
+
+def _requeue_to_stage_02(con, item_id: int) -> bool:
+    cur = con.execute(
+        f"""
+        UPDATE {CFG.table}
+           SET stage = ?
+         WHERE id = ?
+           AND stage = ?
+        """,
+        (int(STA_02), int(item_id), int(STA_03)),
+    )
+    con.commit()
+    return cur.rowcount > 0
 
 
 # ======= フォントキャッシュ =======
@@ -698,12 +731,17 @@ def main() -> int:
         item_id, folder_name = picked
         base_dir = BASE_OUTPUT_ROOT / folder_name
         ndjson_path = base_dir / NDJSON_REL
+        ndjson_fallback = base_dir / NDJSON_FALLBACK_REL
 
         print(f"[PICK] id={item_id} folder={folder_name}")
-        print(f"[INFO] NDJSON: {ndjson_path}")
+        print(f"[INFO] NDJSON(primary): {ndjson_path}")
+        print(f"[INFO] NDJSON(fallback): {ndjson_fallback}")
 
         try:
-            meta, items = read_ndjson(ndjson_path)
+            used_ndjson, meta, items = _read_ndjson_with_fallback(
+                ndjson_path, ndjson_fallback
+            )
+            print(f"[INFO] using NDJSON: {used_ndjson}")
 
             out_title = base_dir / OUT_TITLE_REL
             out_comment_dir = base_dir / OUT_COMMENT_REL_DIR
@@ -729,6 +767,12 @@ def main() -> int:
 
         except Exception as e:
             err = f"{type(e).__name__}: {e}"
+            if isinstance(e, FileNotFoundError):
+                if _requeue_to_stage_02(con, item_id):
+                    print(
+                        f"[WARN] missing input for id={item_id}. requeued stage {STA_03} -> {STA_02}. {err}"
+                    )
+                    return 1
             queue_db.mark_fail(con, CFG.table, item_id, STA_03, err)
             print(f"[ERROR] failed id={item_id} kept stage={STA_03}. {err}")
             return 1
