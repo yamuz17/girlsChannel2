@@ -6,7 +6,7 @@ import sqlite3
 import subprocess
 import sys
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Optional, List
 from zoneinfo import ZoneInfo
@@ -35,16 +35,6 @@ RUNS_POST_DEFAULT = int(getattr(CFG, "RUNS_DEFAULT", 8) or 8)
 if RUNS_POST_DEFAULT <= 0:
     RUNS_POST_DEFAULT = 8
 
-# 前回投稿から次回投稿までの最短待機時間（時間）
-POST_COOLDOWN_HOURS = float(env_loader.env_float("POST_COOLDOWN_HOURS", 24.0))
-if POST_COOLDOWN_HOURS < 0:
-    POST_COOLDOWN_HOURS = 0.0
-
-# 監視開始する経過時間（時間）。この値以上で 24h 未満なら5分おきに再判定する
-POST_WATCH_START_HOURS = float(env_loader.env_float("POST_WATCH_START_HOURS", 23.0))
-if POST_WATCH_START_HOURS < 0:
-    POST_WATCH_START_HOURS = 0.0
-
 # 再判定間隔（秒）
 POST_RECHECK_SEC = int(env_loader.env_int("POST_RECHECK_SEC", 300))
 if POST_RECHECK_SEC <= 0:
@@ -52,6 +42,7 @@ if POST_RECHECK_SEC <= 0:
 
 # 投稿キュー判定に使う設定
 POST_UPLOAD_READY_STAGE = int(env_loader.env_int("POST_UPLOAD_READY_STAGE", 60))
+POST_UPLOAD_UPLOADING_STAGE = int(env_loader.env_int("POST_UPLOAD_UPLOADING_STAGE", 70))
 POST_UPLOAD_TABLE = CFG.ITEMS_DONE_TABLE or "items_done"
 
 
@@ -59,29 +50,8 @@ def now_jst_str() -> str:
     return datetime.now(ZoneInfo("Asia/Tokyo")).strftime("%Y/%m/%d-%H:%M:%S")
 
 
-def parse_jst_datetime(raw: str) -> Optional[datetime]:
-    s = (raw or "").strip()
-    if not s:
-        return None
-
-    for fmt in ("%Y/%m/%d-%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
-        try:
-            dt = datetime.strptime(s, fmt)
-            return dt.replace(tzinfo=ZoneInfo("Asia/Tokyo"))
-        except ValueError:
-            pass
-
-    try:
-        dt = datetime.fromisoformat(s)
-    except ValueError:
-        return None
-
-    if dt.tzinfo is None:
-        return dt.replace(tzinfo=ZoneInfo("Asia/Tokyo"))
-    return dt.astimezone(ZoneInfo("Asia/Tokyo"))
-
-
 def connect(db_path: Path) -> sqlite3.Connection:
+    db_path.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(str(db_path), timeout=60)
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA busy_timeout=60000;")
@@ -155,6 +125,42 @@ def ensure_history_table(con: sqlite3.Connection) -> None:
     con.commit()
 
 
+def ensure_post_tables(con: sqlite3.Connection) -> None:
+    con.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {POST_UPLOAD_TABLE} (
+          id TEXT PRIMARY KEY,
+          skip INTEGER NOT NULL DEFAULT 0,
+          stage INTEGER NOT NULL DEFAULT {POST_UPLOAD_READY_STAGE},
+          category TEXT,
+          post_title TEXT,
+          keywords TEXT,
+          url TEXT,
+          list_add_at TEXT,
+          video_created_at TEXT,
+          youtube_upload_at TEXT,
+          youtube_publish_at TEXT,
+          tiktok_upload_at TEXT,
+          tiktok_publish_at TEXT,
+          folder_delite_at TEXT,
+          folder_name TEXT
+        )
+        """
+    )
+    cols = {
+        str(r[1]) for r in con.execute(f"PRAGMA table_info({POST_UPLOAD_TABLE})").fetchall()
+    }
+    if "upload_youtube_at" not in cols:
+        con.execute(f"ALTER TABLE {POST_UPLOAD_TABLE} ADD COLUMN upload_youtube_at TEXT")
+    if "upload_tiktok_at" not in cols:
+        con.execute(f"ALTER TABLE {POST_UPLOAD_TABLE} ADD COLUMN upload_tiktok_at TEXT")
+    con.execute(
+        f"CREATE INDEX IF NOT EXISTS idx_{POST_UPLOAD_TABLE}_stage ON {POST_UPLOAD_TABLE}(stage, skip, id DESC)"
+    )
+    ensure_history_table(con)
+    con.commit()
+
+
 def record_post_history(
     start_at: str,
     end_at: str,
@@ -162,10 +168,11 @@ def record_post_history(
     error: str,
 ) -> None:
     db_path = CFG.DB_PATH
-    if not db_path or not db_path.exists():
+    if not db_path:
         return
     try:
         with connect(db_path) as con:
+            ensure_post_tables(con)
             ensure_history_table(con)
             con.execute(
                 """
@@ -185,33 +192,12 @@ def record_post_history(
         pass
 
 
-def latest_successful_post_at(db_path: Path) -> Optional[datetime]:
-    if not db_path or not db_path.exists():
-        return None
-    try:
-        with connect(db_path) as con:
-            row = con.execute(
-                """
-                SELECT end_at
-                  FROM run_history
-                 WHERE steps = 'upload_youtube'
-                   AND COALESCE(error, '') = ''
-                 ORDER BY id DESC
-                 LIMIT 1
-                """
-            ).fetchone()
-            if not row:
-                return None
-            return parse_jst_datetime(str(row["end_at"] or ""))
-    except Exception:
-        return None
-
-
 def count_ready_upload_queue(db_path: Path) -> Optional[int]:
-    if not db_path or not db_path.exists():
+    if not db_path:
         return None
     try:
         with connect(db_path) as con:
+            ensure_post_tables(con)
             cols = {
                 str(r[1]) for r in con.execute(f"PRAGMA table_info({POST_UPLOAD_TABLE})").fetchall()
             }
@@ -241,33 +227,68 @@ def count_ready_upload_queue(db_path: Path) -> Optional[int]:
         return None
 
 
-def cooldown_status(now: datetime, last_post_at: datetime) -> tuple[bool, timedelta]:
-    cooldown = timedelta(hours=max(0.0, POST_COOLDOWN_HOURS))
-    elapsed = now - last_post_at
-    if elapsed < cooldown:
-        return False, cooldown - elapsed
-    return True, timedelta(0)
+def recover_stuck_uploading_queue(db_path: Path) -> int:
+    if not db_path:
+        return 0
+    try:
+        with connect(db_path) as con:
+            ensure_post_tables(con)
+            cols = {
+                str(r[1]) for r in con.execute(f"PRAGMA table_info({POST_UPLOAD_TABLE})").fetchall()
+            }
+            if "stage" not in cols or "video_created_at" not in cols:
+                return 0
+
+            upload_col: Optional[str] = None
+            for c in ("upload_youtube_at", "youtube_upload_at"):
+                if c in cols:
+                    upload_col = c
+                    break
+            if not upload_col:
+                return 0
+
+            set_parts = [f"stage = {POST_UPLOAD_READY_STAGE}"]
+            params: List[object] = []
+            if "youtube_status" in cols:
+                set_parts.append("youtube_status = ?")
+                params.append("requeued_from_run_post")
+            if "youtube_error" in cols:
+                set_parts.append("youtube_error = ?")
+                params.append(None)
+
+            params.append(POST_UPLOAD_UPLOADING_STAGE)
+            cur = con.execute(
+                f"""
+                UPDATE {POST_UPLOAD_TABLE}
+                   SET {", ".join(set_parts)}
+                 WHERE stage = ?
+                   AND COALESCE(video_created_at, '') != ''
+                   AND COALESCE({upload_col}, '') = ''
+                   AND COALESCE(skip, 0) = 0
+                """,
+                tuple(params),
+            )
+            con.commit()
+            return int(cur.rowcount or 0)
+    except Exception:
+        return 0
 
 
-def _format_duration(delta: timedelta) -> str:
-    sec = max(0, int(delta.total_seconds()))
-    h = sec // 3600
-    m = (sec % 3600) // 60
-    s = sec % 60
-    return f"{h:02d}:{m:02d}:{s:02d}"
+def print_section(title: str) -> None:
+    print(f"\n=== {title} ===")
 
 
 def run_script_realtime(
     script_path: Path, timeout: Optional[int], extra_args: Optional[List[str]] = None
 ) -> None:
     if not script_path.exists():
-        raise FileNotFoundError(f"script not found: {script_path}")
+        raise FileNotFoundError(f"スクリプトが見つかりません: {script_path}")
 
     cmd = [sys.executable, str(script_path)]
     if extra_args:
         cmd.extend(extra_args)
 
-    print("[RUN]", " ".join(cmd))
+    print(f"[実行] {' '.join(cmd)}")
     start = time.time()
 
     p = subprocess.Popen(
@@ -286,71 +307,58 @@ def run_script_realtime(
         rc = p.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
         p.kill()
-        raise RuntimeError(f"{script_path.name} timeout")
+        raise RuntimeError(f"{script_path.name} がタイムアウトしました")
     finally:
         elapsed = time.time() - start
 
     if rc != 0:
-        raise RuntimeError(f"{script_path.name} failed (exit={rc})")
+        raise RuntimeError(f"{script_path.name} が失敗しました (終了コード={rc})")
 
-    print(f"[OK] {script_path.name} finished in {elapsed:.1f}s")
+    print(f"[完了] {script_path.name} を終了しました ({elapsed:.1f}秒)")
 
 
 def main() -> int:
     started_at = now_jst_str()
     t0 = time.time()
     last_error = ""
-    jst_now = datetime.now(ZoneInfo("Asia/Tokyo"))
 
-    print(f"[CONF] SCRIPT_SCHEDULE : {SCRIPT_SCHEDULE}")
-    print(f"[CONF] TIMEOUT_SCHEDULE: {TIMEOUT_SCHEDULE}")
-    print(f"[CONF] RUNS_POST_DEFAULT: {RUNS_POST_DEFAULT}")
-    print(f"[CONF] POST_COOLDOWN_HOURS: {POST_COOLDOWN_HOURS}")
-    print(f"[CONF] POST_WATCH_START_HOURS: {POST_WATCH_START_HOURS}")
-    print(f"[CONF] POST_RECHECK_SEC: {POST_RECHECK_SEC}")
-    print(f"[CONF] POST_UPLOAD_TABLE: {POST_UPLOAD_TABLE}")
-    print(f"[CONF] POST_UPLOAD_READY_STAGE: {POST_UPLOAD_READY_STAGE}")
+    print_section("投稿処理設定")
+    print(f"[設定] 実行スクリプト: {SCRIPT_SCHEDULE}")
+    print(f"[設定] タイムアウト秒: {TIMEOUT_SCHEDULE}")
+    print(f"[設定] 1回あたり最大投稿数: {RUNS_POST_DEFAULT}")
+    print(f"[設定] 再確認間隔秒: {POST_RECHECK_SEC}")
+    print(f"[設定] 投稿対象テーブル: {POST_UPLOAD_TABLE}")
+    print(f"[設定] 投稿待ちステージ: {POST_UPLOAD_READY_STAGE}")
+    print(f"[設定] 投稿中ステージ: {POST_UPLOAD_UPLOADING_STAGE}")
 
     try:
-        last_post_at = latest_successful_post_at(CFG.DB_PATH)
-        if last_post_at is not None:
-            elapsed = jst_now - last_post_at
-            watch_start = timedelta(hours=max(0.0, POST_WATCH_START_HOURS))
-            can_run, remaining = cooldown_status(jst_now, last_post_at)
-            if not can_run and elapsed < watch_start:
-                last_error = (
-                    "[SKIP] upload cooldown active "
-                    f"(last_success={last_post_at.strftime('%Y/%m/%d-%H:%M:%S')}, "
-                    f"remaining={_format_duration(remaining)})"
-                )
-                print(last_error)
-                return_code = 0
-                return return_code
-            if not can_run:
-                print(
-                    "[INFO] cooldown watch mode "
-                    f"(last_success={last_post_at.strftime('%Y/%m/%d-%H:%M:%S')}, "
-                    f"remaining={_format_duration(remaining)})"
-                )
-
         ok_count = 0
         while ok_count < RUNS_POST_DEFAULT:
             pending = count_ready_upload_queue(CFG.DB_PATH)
             if pending == 0:
-                print("[INFO] upload queue is empty. stop run_post.")
-                break
+                recovered = recover_stuck_uploading_queue(CFG.DB_PATH)
+                if recovered > 0:
+                    print(
+                        f"[復旧] stage={POST_UPLOAD_UPLOADING_STAGE} で滞留していた "
+                        f"{recovered}件を stage={POST_UPLOAD_READY_STAGE} に戻しました"
+                    )
+                    pending = count_ready_upload_queue(CFG.DB_PATH)
+                if pending == 0:
+                    print("[終了] 投稿待ちキューが空のため、run_post を停止します")
+                    break
             if pending is not None:
                 print(
-                    f"[INFO] upload queue pending={pending} "
-                    f"(ok_count={ok_count}/{RUNS_POST_DEFAULT})"
+                    f"[進捗] 投稿待ち件数={pending} "
+                    f"(成功={ok_count}/{RUNS_POST_DEFAULT})"
                 )
             else:
                 print(
-                    f"[INFO] upload queue count unavailable "
-                    f"(ok_count={ok_count}/{RUNS_POST_DEFAULT})"
+                    f"[進捗] 投稿待ち件数を取得できません "
+                    f"(成功={ok_count}/{RUNS_POST_DEFAULT})"
                 )
 
             try:
+                print_section(f"投稿実行 {ok_count + 1}/{RUNS_POST_DEFAULT}")
                 run_script_realtime(
                     SCRIPT_SCHEDULE,
                     TIMEOUT_SCHEDULE,
@@ -370,17 +378,17 @@ def main() -> int:
                 )
                 last_error = ""
                 ok_count += 1
-                print(f"[OK] single upload succeeded ({ok_count}/{RUNS_POST_DEFAULT})")
+                print(f"[成功] 1件の投稿が完了しました ({ok_count}/{RUNS_POST_DEFAULT})")
             except Exception as e:
                 last_error = str(e)
-                print(f"[WARN] single upload failed: {last_error}", file=sys.stderr)
-                print(f"[WAIT] retry in {POST_RECHECK_SEC}s")
+                print(f"[警告] 1件の投稿に失敗しました: {last_error}", file=sys.stderr)
+                print(f"[待機] {POST_RECHECK_SEC}秒後に再試行します")
                 time.sleep(POST_RECHECK_SEC)
 
         return_code = 0
     except Exception as e:
         last_error = str(e)
-        print(f"[ERR] {last_error}", file=sys.stderr)
+        print(f"[エラー] {last_error}", file=sys.stderr)
         return_code = 1
     finally:
         record_post_history(

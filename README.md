@@ -35,6 +35,7 @@ python scripts/steps/post_upload.py
 `items_do` カラム:
 - `id`
 - `skip`
+- `stage`
 - `hot_score`
 - `category`
 - `title`

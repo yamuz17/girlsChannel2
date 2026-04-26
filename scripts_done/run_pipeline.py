@@ -62,6 +62,10 @@ RUN_STEPS_RAW = (env_loader.env_str("RUN_STEPS", "pipeline") or "pipeline").stri
 PIPELINE_UNTIL_RAW = (env_loader.env_str("PIPELINE_UNTIL", "99") or "99").strip()
 MAX_PIPELINE_CYCLES = int(env_loader.env_int("MAX_PIPELINE_CYCLES", 0))
 POST_TITLE_MAX_CHARS = int(env_loader.env_int("POST_TITLE_MAX_CHARS", 95))
+STALLED_JOB_ACTION = (
+    env_loader.env_str("STALLED_JOB_ACTION", "error").strip().lower() or "error"
+)
+STALLED_STAGE_VALUE = int(env_loader.env_int("STALLED_STAGE_VALUE", 999))
 
 # ステージ番号
 STA_02 = CFG.STA_02
@@ -91,6 +95,13 @@ SQLITE_SYNCHRONOUS = (CFG.SQLITE_SYNCHRONOUS or "NORMAL").strip()
 PIPELINE_STAGE_ORDER = ["02", "03", "04", "05", "99"]
 PIPELINE_LIMIT_TAG = "99"
 PIPELINE_LIMIT_IDX = PIPELINE_STAGE_ORDER.index(PIPELINE_LIMIT_TAG)
+PIPELINE_STAGE_END_MAP = {
+    "02": END_02,
+    "03": END_03,
+    "04": END_04,
+    "05": END_05,
+    "99": END_99,
+}
 
 
 @dataclass
@@ -127,6 +138,7 @@ def ensure_tables(con: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS {ITEMS_DO_TABLE} (
           id TEXT PRIMARY KEY,
           skip INTEGER NOT NULL DEFAULT 0,
+          stage INTEGER,
           hot_score REAL,
           category TEXT NOT NULL,
           title TEXT NOT NULL,
@@ -140,6 +152,7 @@ def ensure_tables(con: sqlite3.Connection) -> None:
     expected_items_do = [
         "id",
         "skip",
+        "stage",
         "hot_score",
         "category",
         "title",
@@ -159,6 +172,7 @@ def ensure_tables(con: sqlite3.Connection) -> None:
             CREATE TABLE {tmp} (
               id TEXT PRIMARY KEY,
               skip INTEGER NOT NULL DEFAULT 0,
+              stage INTEGER,
               hot_score REAL,
               category TEXT NOT NULL,
               title TEXT NOT NULL,
@@ -245,6 +259,30 @@ def _pick_col(cols: set[str], candidates: List[str]) -> Optional[str]:
         if c in cols:
             return c
     return None
+
+
+def sync_items_do_stage_from_items_done(con: sqlite3.Connection) -> None:
+    # items_do.stage は確認用。pipeline の判定には使わず、items_done から同期する。
+    cols_do = {
+        str(r[1]) for r in con.execute(f"PRAGMA table_info({ITEMS_DO_TABLE})").fetchall()
+    }
+    cols_done = {
+        str(r[1]) for r in con.execute(f"PRAGMA table_info({ITEMS_DONE_TABLE})").fetchall()
+    }
+    if "stage" not in cols_do or "id" not in cols_done or "stage" not in cols_done:
+        return
+    con.execute(
+        f"""
+        UPDATE {ITEMS_DO_TABLE} AS d
+           SET stage = (
+               SELECT n.stage
+                 FROM {ITEMS_DONE_TABLE} AS n
+                WHERE n.id = d.id
+                LIMIT 1
+           )
+        """
+    )
+    con.commit()
 
 
 def sync_youtube_history_from_items_done(con: sqlite3.Connection) -> int:
@@ -546,6 +584,7 @@ def enqueue_from_items_do(con: sqlite3.Connection, limit: int) -> List[str]:
         if cur.rowcount > 0:
             added_ids.append(item_id)
     con.commit()
+    sync_items_do_stage_from_items_done(con)
     return added_ids
 
 
@@ -596,30 +635,144 @@ def process_one_item(
     return 0
 
 
-def count_completed_videos(con: sqlite3.Connection, target_ids: List[str]) -> int:
+def enabled_pipeline_tags() -> List[str]:
+    return [
+        tag
+        for tag in PIPELINE_STAGE_ORDER
+        if PIPELINE_STAGE_ORDER.index(tag) <= PIPELINE_LIMIT_IDX
+    ]
+
+
+def count_completed_pipeline_steps(con: sqlite3.Connection, target_ids: List[str]) -> int:
     if not target_ids:
         return 0
+
+    enabled_tags = enabled_pipeline_tags()
+    if not enabled_tags:
+        return 0
+
     ph = ",".join(["?"] * len(target_ids))
-    row = con.execute(
+    rows = con.execute(
         f"""
-        SELECT COUNT(*) AS n
+        SELECT id, stage, video_created_at
           FROM {ITEMS_DONE_TABLE}
          WHERE id IN ({ph})
-           AND (
-                 COALESCE(video_created_at,'') != ''
-                 OR stage = ?
-               )
         """,
-        tuple(target_ids + [int(END_99)]),
+        tuple(target_ids),
+    ).fetchall()
+
+    completed = 0
+    for row in rows:
+        stage_value = int(row["stage"] or 0)
+        video_created_at = str(row["video_created_at"] or "").strip()
+        for tag in enabled_tags:
+            if tag == "99" and video_created_at:
+                completed += 1
+                continue
+            if stage_value >= int(PIPELINE_STAGE_END_MAP[tag]):
+                completed += 1
+    return completed
+
+
+def describe_pending_pipeline_job(
+    con: sqlite3.Connection, target_ids: List[str]
+) -> str:
+    row = pick_inprogress_job(con, target_ids=target_ids)
+    if row is None:
+        return "pending_job=none"
+
+    item_id = str(row["id"])
+    detail = con.execute(
+        f"""
+        SELECT id, stage, post_title, folder_name, video_created_at
+          FROM {ITEMS_DONE_TABLE}
+         WHERE id = ?
+         LIMIT 1
+        """,
+        (item_id,),
     ).fetchone()
-    return int(row["n"] or 0) if row else 0
+    if detail is None:
+        return f"pending_job=id={item_id}"
+
+    post_title = str(detail["post_title"] or "").strip()
+    folder_name = str(detail["folder_name"] or "").strip()
+    video_created_at = str(detail["video_created_at"] or "").strip()
+    parts = [
+        f"id={item_id}",
+        f"stage={int(detail['stage'] or 0)}",
+    ]
+    if folder_name:
+        parts.append(f"folder_name={folder_name}")
+    if post_title:
+        parts.append(f"post_title={post_title}")
+    if video_created_at:
+        parts.append(f"video_created_at={video_created_at}")
+    return "pending_job=" + " ".join(parts)
+
+
+def load_pending_pipeline_job(
+    con: sqlite3.Connection, target_ids: List[str]
+) -> Optional[sqlite3.Row]:
+    row = pick_inprogress_job(con, target_ids=target_ids)
+    if row is None:
+        return None
+    return con.execute(
+        f"""
+        SELECT id, stage, post_title, folder_name, video_created_at
+          FROM {ITEMS_DONE_TABLE}
+         WHERE id = ?
+         LIMIT 1
+        """,
+        (str(row["id"]),),
+    ).fetchone()
+
+
+def handle_stalled_pipeline_job(
+    con: sqlite3.Connection, target_ids: List[str]
+) -> str:
+    row = load_pending_pipeline_job(con, target_ids=target_ids)
+    if row is None:
+        return "pending_job=none action=none"
+
+    item_id = str(row["id"])
+    stage_value = int(row["stage"] or 0)
+
+    if STALLED_JOB_ACTION == "quarantine":
+        con.execute(
+            f"""
+            UPDATE {ITEMS_DONE_TABLE}
+               SET stage = ?
+             WHERE id = ?
+            """,
+            (int(STALLED_STAGE_VALUE), item_id),
+        )
+        con.commit()
+        return (
+            f"pending_job=id={item_id} stage={stage_value} "
+            f"action=quarantine new_stage={STALLED_STAGE_VALUE}"
+        )
+
+    if STALLED_JOB_ACTION == "revive":
+        con.execute(
+            f"""
+            UPDATE {ITEMS_DONE_TABLE}
+               SET stage = ?,
+                   folder_name = NULL,
+                   video_created_at = NULL
+             WHERE id = ?
+            """,
+            (int(STA_02), item_id),
+        )
+        con.commit()
+        return (
+            f"pending_job=id={item_id} stage={stage_value} "
+            f"action=revive new_stage={STA_02}"
+        )
+
+    return describe_pending_pipeline_job(con, target_ids)
 
 
 def main() -> int:
-    if not DB_PATH.exists():
-        print(f"[ERROR] DB not found: {DB_PATH}", file=sys.stderr)
-        return 2
-
     steps = _parse_steps(RUN_STEPS_RAW)
     limit_tag = _pipeline_limit_tag(PIPELINE_UNTIL_RAW)
 
@@ -646,6 +799,7 @@ def main() -> int:
     try:
         with connect(DB_PATH) as con:
             ensure_tables(con)
+            sync_items_do_stage_from_items_done(con)
             sync_youtube_history_from_items_done(con)
             if "pipeline" in steps:
                 target_ids = enqueue_from_items_do(con, target_video_count)
@@ -653,15 +807,19 @@ def main() -> int:
                     print("[INFO] enqueue対象がありません（items_doに新規候補なし）")
                     return 0
 
-                pbar = tqdm(total=len(target_ids), desc="create_video", unit="video")
-                done = count_completed_videos(con, target_ids)
+                total_steps = len(target_ids) * len(enabled_pipeline_tags())
+                pbar = tqdm(total=total_steps, desc="create_video", unit="step")
+                done = count_completed_pipeline_steps(con, target_ids)
                 pbar.update(done)
 
                 cycles = 0
-                while done < len(target_ids):
+                no_progress_cycles = 0
+                no_progress_limit = min(max_cycles, max(8, len(target_ids) * 2))
+                while done < total_steps:
                     if cycles >= max_cycles:
+                        pending_info = handle_stalled_pipeline_job(con, target_ids)
                         raise RuntimeError(
-                            f"max_cycles超過: done={done}/{len(target_ids)} cycles={cycles}"
+                            f"max_cycles超過: done={done}/{total_steps} cycles={cycles} {pending_info}"
                         )
                     try:
                         rc = process_one_item(con, target_ids=target_ids)
@@ -677,11 +835,23 @@ def main() -> int:
                         if STOP_ON_ERROR:
                             break
                     finally:
-                        new_done = count_completed_videos(con, target_ids)
+                        new_done = count_completed_pipeline_steps(con, target_ids)
                         if new_done > done:
                             pbar.update(new_done - done)
+                            no_progress_cycles = 0
+                        else:
+                            no_progress_cycles += 1
                         done = new_done
                         cycles += 1
+                    if no_progress_cycles >= no_progress_limit:
+                        pending_info = handle_stalled_pipeline_job(con, target_ids)
+                        raise RuntimeError(
+                            "進捗停止を検知: "
+                            f"done={done}/{total_steps} "
+                            f"no_progress_cycles={no_progress_cycles} "
+                            f"limit={no_progress_limit} "
+                            f"{pending_info}"
+                        )
                     if SLEEP_SEC_WHEN_EMPTY > 0:
                         time.sleep(SLEEP_SEC_WHEN_EMPTY)
                 pbar.close()

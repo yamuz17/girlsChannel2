@@ -53,11 +53,11 @@ def _default_values() -> Dict[str, str]:
         / "GoogleDrive-yuma17.service@gmail.com"
         / "マイドライブ"
         / "python"
-        / "output"
+        / "project_girlsChannel"
     )
     return {
-        "DB_PATH": str(base / "list_category_gossip.db"),
-        "BASE_OUTPUT_ROOT": str(base),
+        "DB_PATH": str(base / "db" / "list_girlsChannel.db"),
+        "BASE_OUTPUT_ROOT": str(base / "02_outputs"),
     }
 
 

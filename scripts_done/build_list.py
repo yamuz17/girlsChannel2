@@ -22,7 +22,11 @@ from zoneinfo import ZoneInfo
 
 from tqdm import tqdm
 from dateutil import parser as dtparser
-from playwright.sync_api import sync_playwright, TimeoutError as PWTimeoutError
+from playwright.sync_api import (
+    sync_playwright,
+    TimeoutError as PWTimeoutError,
+    Error as PWError,
+)
 
 # Allow running from scripts_done/ directly.
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -44,8 +48,9 @@ TABLE_NAME = CFG.ITEMS_DO_TABLE or "items_do"
 PAGE_FROM = int(env_str("PAGE_FROM", "1"))
 PAGE_TO = int(env_str("PAGE_TO", "15"))
 
-TARGET_NEW_COUNT = int(env_str("TARGET_NEW_COUNT", "800"))
-MIN_COMMENTS = int(env_str("MIN_COMMENTS", "800"))
+TARGET_NEW_COUNT = int(env_str("TARGET_NEW_COUNT", "650"))
+MIN_COMMENTS = int(env_str("MIN_COMMENTS", "650"))
+FIRST_POST_MIN_AT_RAW = env_str("FIRST_POST_MIN_AT", "2026/03/16-22:00:00").strip()
 UPDATE_EXISTING = env_str("UPDATE_EXISTING", "false").lower() in (
     "1",
     "true",
@@ -57,6 +62,11 @@ UPDATE_EXISTING = env_str("UPDATE_EXISTING", "false").lower() in (
 HEADLESS = env_str("HEADLESS", "true").lower() in ("1", "true", "yes", "y", "on")
 SLEEP_SEC = float(env_str("SLEEP_SEC", "0.6"))
 TIMEOUT_MS = int(env_str("TIMEOUT_MS", "30000"))
+PLAYWRIGHT_EXECUTABLE_PATH = env_str("PLAYWRIGHT_EXECUTABLE_PATH", "").strip()
+BROWSER_LAUNCH_MAX_RETRIES = max(1, int(env_str("BROWSER_LAUNCH_MAX_RETRIES", "5")))
+BROWSER_LAUNCH_RETRY_SLEEP_SEC = float(
+    env_str("BROWSER_LAUNCH_RETRY_SLEEP_SEC", "2")
+)
 
 ECHO_EACH_SAVE = env_str("ECHO_EACH_SAVE", "false").lower() in (
     "1",
@@ -226,6 +236,7 @@ DDL_ITEMS = f"""
 CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
   id TEXT PRIMARY KEY,
   skip INTEGER NOT NULL DEFAULT 0,
+  stage INTEGER,
   hot_score REAL,
   category TEXT NOT NULL,
   title TEXT NOT NULL,
@@ -342,6 +353,7 @@ def _ensure_items_do_column_order(con: sqlite3.Connection) -> None:
     expected = [
         "id",
         "skip",
+        "stage",
         "hot_score",
         "category",
         "title",
@@ -364,6 +376,7 @@ def _ensure_items_do_column_order(con: sqlite3.Connection) -> None:
         CREATE TABLE {tmp} (
           id TEXT PRIMARY KEY,
           skip INTEGER NOT NULL DEFAULT 0,
+          stage INTEGER,
           hot_score REAL,
           category TEXT NOT NULL,
           title TEXT NOT NULL,
@@ -423,6 +436,49 @@ def exists_id(con: sqlite3.Connection, tid: str) -> bool:
     return row is not None
 
 
+def lookup_items_done_stage(con: sqlite3.Connection, tid: str) -> int | None:
+    done_table = CFG.ITEMS_DONE_TABLE or "items_done"
+    done_cols = {
+        str(r[1]) for r in con.execute(f"PRAGMA table_info({done_table})").fetchall()
+    }
+    if "id" not in done_cols or "stage" not in done_cols:
+        return None
+    row = con.execute(
+        f"""
+        SELECT stage
+          FROM {done_table}
+         WHERE id = ?
+         LIMIT 1
+        """,
+        (tid,),
+    ).fetchone()
+    if not row:
+        return None
+    value = row["stage"]
+    return int(value) if value is not None else None
+
+
+def sync_items_do_stage_from_items_done(con: sqlite3.Connection) -> None:
+    done_table = CFG.ITEMS_DONE_TABLE or "items_done"
+    done_cols = {
+        str(r[1]) for r in con.execute(f"PRAGMA table_info({done_table})").fetchall()
+    }
+    if "id" not in done_cols or "stage" not in done_cols:
+        return
+    con.execute(
+        f"""
+        UPDATE {TABLE_NAME} AS d
+           SET stage = (
+               SELECT n.stage
+                 FROM {done_table} AS n
+                WHERE n.id = d.id
+                LIMIT 1
+           )
+        """
+    )
+    con.commit()
+
+
 def _normalize_for_badword_check(s: str) -> str:
     t = s or ""
     t = t.replace("\r\n", "\n").replace("\r", "\n")
@@ -444,11 +500,12 @@ def contains_badword(text: str) -> bool:
 def upsert_item(con: sqlite3.Connection, row: Dict[str, Any]) -> None:
     sql = f"""
     INSERT INTO {TABLE_NAME} (
-      id, skip, hot_score, category, title, comments_count,
+      id, skip, stage, hot_score, category, title, comments_count,
       first_post_at, last_post_at, list_add_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       skip = CASE WHEN {TABLE_NAME}.skip = 1 THEN 1 ELSE excluded.skip END,
+      stage=excluded.stage,
       category=excluded.category,
       title=excluded.title,
       first_post_at=COALESCE({TABLE_NAME}.first_post_at, excluded.first_post_at),
@@ -461,6 +518,7 @@ def upsert_item(con: sqlite3.Connection, row: Dict[str, Any]) -> None:
         (
             row["id"],
             int(row.get("skip", 0)),
+            row.get("stage"),
             row.get("hot_score"),
             row["category"],
             row["title"],
@@ -486,6 +544,19 @@ def normalize_list_datetime(raw: str) -> str:
         return dt.strftime("%Y/%m/%d-%H:%M:%S")
     except Exception:
         return txt
+
+
+def parse_jst_datetime(raw: str) -> datetime | None:
+    txt = (raw or "").strip()
+    if not txt:
+        return None
+    try:
+        dt = dtparser.parse(txt, fuzzy=True)
+    except Exception:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=ZoneInfo("Asia/Tokyo"))
+    return dt.astimezone(ZoneInfo("Asia/Tokyo"))
 
 
 def parse_first_post_from_text(body_text: str) -> str | None:
@@ -560,6 +631,88 @@ def build_post_title(title: str) -> str:
     return core if core else raw
 
 
+def _candidate_browser_paths() -> List[Path]:
+    paths: List[Path] = []
+    if PLAYWRIGHT_EXECUTABLE_PATH:
+        paths.append(Path(PLAYWRIGHT_EXECUTABLE_PATH))
+
+    paths.extend(
+        [
+            Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+            Path.home()
+            / "Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            Path("/Applications/Chromium.app/Contents/MacOS/Chromium"),
+            Path.home() / "Applications/Chromium.app/Contents/MacOS/Chromium",
+        ]
+    )
+    return paths
+
+
+def launch_browser_with_fallback(p):
+    attempts: List[Tuple[str, Dict[str, Any]]] = [("bundled Chromium", {"headless": HEADLESS})]
+
+    bundled_exe = ""
+    try:
+        bundled_exe = str(p.chromium.executable_path or "").strip()
+    except Exception:
+        bundled_exe = ""
+    if bundled_exe:
+        attempts.append(
+            (
+                "bundled Chromium executable_path",
+                {"headless": HEADLESS, "executable_path": bundled_exe},
+            )
+        )
+
+    for path in _candidate_browser_paths():
+        if path.is_file():
+            attempts.append(
+                (
+                    f"local browser executable_path={path}",
+                    {"headless": HEADLESS, "executable_path": str(path)},
+                )
+            )
+
+    seen_keys: set[Tuple[Tuple[str, str], ...]] = set()
+    last_error: Exception | None = None
+    for retry_no in range(1, BROWSER_LAUNCH_MAX_RETRIES + 1):
+        print(
+            f"[情報] ブラウザ起動リトライ {retry_no}/{BROWSER_LAUNCH_MAX_RETRIES}"
+        )
+        for label, kwargs in attempts:
+            key = tuple(sorted((k, str(v)) for k, v in kwargs.items()))
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            print(f"[情報] ブラウザ起動を試行: {label}")
+            try:
+                browser = p.chromium.launch(**kwargs)
+                print(f"[情報] ブラウザ起動成功: {label}")
+                return browser
+            except PWError as e:
+                last_error = e
+                print(f"[警告] ブラウザ起動失敗: {label} ({type(e).__name__}: {e})")
+
+        seen_keys.clear()
+        if (
+            retry_no < BROWSER_LAUNCH_MAX_RETRIES
+            and BROWSER_LAUNCH_RETRY_SLEEP_SEC > 0
+        ):
+            print(
+                "[情報] ブラウザ起動を再試行するまで待機します "
+                f"({BROWSER_LAUNCH_RETRY_SLEEP_SEC:.1f}秒)"
+            )
+            time.sleep(BROWSER_LAUNCH_RETRY_SLEEP_SEC)
+
+    raise RuntimeError(
+        "Playwright のブラウザ起動に失敗しました。"
+        " PLAYWRIGHT_EXECUTABLE_PATH にローカル Chrome/Chromium の実行ファイルを指定してください。"
+        if last_error is None
+        else "Playwright のブラウザ起動に失敗しました。"
+        " HEADLESS=false か PLAYWRIGHT_EXECUTABLE_PATH の指定を試してください。"
+    ) from last_error
+
+
 def main() -> int:
     run_start = now_jst_str()
     t0 = time.time()
@@ -573,8 +726,17 @@ def main() -> int:
             raise SystemExit("MIN_COMMENTS は 0以上にしてください")
         if not CATEGORIES:
             raise SystemExit("CATEGORIES が空です")
+        first_post_min_at = None
+        if FIRST_POST_MIN_AT_RAW:
+            first_post_min_at = parse_jst_datetime(FIRST_POST_MIN_AT_RAW)
+            if first_post_min_at is None:
+                raise SystemExit(
+                    "FIRST_POST_MIN_AT の形式が不正です。例: 2026/03/01-00:00:00"
+                )
+        need_first_post_before_save = ENABLE_FIRST_POST or first_post_min_at is not None
 
         con = connect(DB_PATH)
+        sync_items_do_stage_from_items_done(con)
 
         saved = 0
         pages_done = 0
@@ -582,39 +744,52 @@ def main() -> int:
         skipped_exists = 0
         skipped_under_min = 0
         skipped_badword = 0
+        skipped_first_post_before_min = 0
         failed_item = 0
         failed_page = 0
 
-        new_ids: List[str] = []
         first_post_filled = 0
         first_post_failed = 0
 
-        print(f"[INFO] DB: {DB_PATH}")
-        print(f"[INFO] table: {TABLE_NAME}")
-        print(f"[INFO] page_from..to: {PAGE_FROM}..{PAGE_TO}")
-        print(f"[INFO] target_save(total): {TARGET_NEW_COUNT}")
-        print(f"[INFO] min_comments: {MIN_COMMENTS}")
-        print(f"[INFO] update_existing: {UPDATE_EXISTING}")
-        print(f"[INFO] categories: {', '.join([c.name for c in CATEGORIES])}")
+        print(f"[情報] DB: {DB_PATH}")
+        print(f"[情報] テーブル: {TABLE_NAME}")
+        print(f"[情報] 取得ページ範囲: {PAGE_FROM}..{PAGE_TO}")
+        print(f"[情報] 保存目標件数: {TARGET_NEW_COUNT}")
+        print(f"[情報] 最低コメント数: {MIN_COMMENTS}")
+        print(f"[情報] 既存更新: {UPDATE_EXISTING}")
+        print(f"[情報] 対象カテゴリ: {', '.join([c.name for c in CATEGORIES])}")
         for c in CATEGORIES:
             print(f"  - {c.name}: {c.base_url}/?{(c.params or '').lstrip('?')}")
-        print(f"[INFO] early_stop_pages(per_category): {EARLY_STOP_PAGES}")
+        print(f"[情報] 連続空振り停止ページ数: {EARLY_STOP_PAGES}")
+        print(f"[情報] first_post取得: {need_first_post_before_save}")
+        if first_post_min_at is not None:
+            print(
+                "[情報] first_post下限日時: "
+                f"{first_post_min_at.strftime('%Y/%m/%d-%H:%M:%S')}"
+            )
+        print(f"[情報] headless: {HEADLESS}")
+        if PLAYWRIGHT_EXECUTABLE_PATH:
+            print(f"[情報] PLAYWRIGHT_EXECUTABLE_PATH: {PLAYWRIGHT_EXECUTABLE_PATH}")
+        print(f"[情報] ブラウザ起動最大試行回数: {BROWSER_LAUNCH_MAX_RETRIES}")
 
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=HEADLESS)
+            print("[情報] Playwright 初期化完了")
+            browser = None
+            context = None
+            browser = launch_browser_with_fallback(p)
             context = browser.new_context(locale="ja-JP")
             page = context.new_page()
             detail_page = context.new_page()
 
             try:
-                pbar = tqdm(total=TARGET_NEW_COUNT, desc="saved")
+                pbar = tqdm(total=TARGET_NEW_COUNT, desc="保存件数")
 
                 for cfg in CATEGORIES:
                     if saved >= TARGET_NEW_COUNT:
                         break
 
                     print(
-                        f"\n[CATEGORY] {cfg.name}  base={cfg.base_url}  params={cfg.params}"
+                        f"\n[カテゴリ] {cfg.name}  base={cfg.base_url}  params={cfg.params}"
                     )
                     consecutive_no_save_pages = 0
 
@@ -633,14 +808,14 @@ def main() -> int:
                             if (not resp) or (status and status >= 400):
                                 failed_page += 1
                                 print(
-                                    f"[PAGE_FAIL] cat={cfg.name} page={page_no} status={status} url={url}"
+                                    f"[ページ取得失敗] cat={cfg.name} page={page_no} status={status} url={url}"
                                 )
                                 time.sleep(SLEEP_SEC)
                                 continue
                         except PWTimeoutError:
                             failed_page += 1
                             print(
-                                f"[PAGE_TIMEOUT] cat={cfg.name} page={page_no} url={url}"
+                                f"[ページタイムアウト] cat={cfg.name} page={page_no} url={url}"
                             )
                             time.sleep(SLEEP_SEC)
                             continue
@@ -650,7 +825,7 @@ def main() -> int:
                         )
                         li_count = li_locator.count()
                         if li_count == 0:
-                            print(f"[NO_ITEMS] cat={cfg.name} page={page_no} url={url}")
+                            print(f"[候補なし] cat={cfg.name} page={page_no} url={url}")
                             break
 
                         page_rows: List[Tuple[int, Dict[str, Any], int]] = []
@@ -712,6 +887,7 @@ def main() -> int:
                             row: Dict[str, Any] = {
                                 "id": tid,
                                 "skip": badword_flag,
+                                "stage": lookup_items_done_stage(con, tid),
                                 "hot_score": None,
                                 "category": cfg.name,
                                 "title": title,
@@ -735,12 +911,32 @@ def main() -> int:
                             if saved >= TARGET_NEW_COUNT:
                                 break
 
+                            fp: str | None = None
+                            if need_first_post_before_save:
+                                fp = fetch_first_post_via_comment1(detail_page, row["id"])
+                                if fp:
+                                    row["first_post_at"] = fp
+                                    first_post_filled += 1
+                                    if first_post_min_at is not None:
+                                        fp_dt = parse_jst_datetime(fp)
+                                        if fp_dt is not None and fp_dt < first_post_min_at:
+                                            skipped_first_post_before_min += 1
+                                            if ECHO_EACH_SAVE:
+                                                print(
+                                                    "[除外] first_postが下限日時より前のため保存しません "
+                                                    f"id={row['id']} first_post={fp}"
+                                                )
+                                            if DETAIL_SLEEP_SEC > 0:
+                                                time.sleep(DETAIL_SLEEP_SEC)
+                                            continue
+                                else:
+                                    first_post_failed += 1
+                                if DETAIL_SLEEP_SEC > 0:
+                                    time.sleep(DETAIL_SLEEP_SEC)
+
                             existed = exists_id(con, row["id"])
                             upsert_item(con, row)
                             con.commit()
-
-                            if not existed:
-                                new_ids.append(row["id"])
 
                             saved += 1
                             page_saved += 1
@@ -749,7 +945,7 @@ def main() -> int:
                             if ECHO_EACH_SAVE:
                                 suffix = " skip=1" if badword_flag else ""
                                 print(
-                                    f"[OK] cat={cfg.name} page={page_no} li={orig_idx} saved={saved} id={row['id']} "
+                                    f"[保存] cat={cfg.name} page={page_no} li={orig_idx} saved={saved} id={row['id']} "
                                     f"post={row['last_post_at']} c={row['comments_count']} "
                                     f"title={row['title'][:60]}{suffix}"
                                 )
@@ -757,15 +953,16 @@ def main() -> int:
                         if page_saved == 0:
                             consecutive_no_save_pages += 1
                             print(
-                                f"[NO_SAVE] cat={cfg.name} page={page_no} consecutive={consecutive_no_save_pages} "
-                                f"(under_min_total={skipped_under_min}, exists_total={skipped_exists}, failed_total={failed_item})"
+                                f"[保存なし] cat={cfg.name} page={page_no} consecutive={consecutive_no_save_pages} "
+                                f"(under_min_total={skipped_under_min}, exists_total={skipped_exists}, "
+                                f"first_post_before_min_total={skipped_first_post_before_min}, failed_total={failed_item})"
                             )
                             if (
                                 EARLY_STOP_PAGES > 0
                                 and consecutive_no_save_pages >= EARLY_STOP_PAGES
                             ):
                                 print(
-                                    "[EARLY_STOP] no saved items for consecutive pages (this category) -> stop this category"
+                                    "[早期停止] 連続で保存対象がなかったため、このカテゴリを打ち切ります"
                                 )
                                 break
                         else:
@@ -775,31 +972,18 @@ def main() -> int:
 
                 pbar.close()
 
-                if ENABLE_FIRST_POST and new_ids:
-                    print("\n[STEP] fetch first_post (newly inserted only)")
-                    for tid in new_ids:
-                        fp = fetch_first_post_via_comment1(detail_page, tid)
-                        if fp:
-                            con.execute(
-                                f"UPDATE {TABLE_NAME} SET first_post_at = COALESCE(first_post_at, ?) WHERE id=?",
-                                (fp, tid),
-                            )
-                            con.commit()
-                            first_post_filled += 1
-                        else:
-                            first_post_failed += 1
-                        if DETAIL_SLEEP_SEC > 0:
-                            time.sleep(DETAIL_SLEEP_SEC)
-
                 if HOTNESS_ENABLE:
-                    print("\n[STEP] recompute hotness")
+                    print("\n[処理] hot_score を再計算します")
                     recompute_hot_scores(con)
+                sync_items_do_stage_from_items_done(con)
             finally:
                 con.close()
-                context.close()
-                browser.close()
+                if context is not None:
+                    context.close()
+                if browser is not None:
+                    browser.close()
 
-        print("\n[SUMMARY]")
+        print("\n[集計]")
         print(f"  saved={saved} target={TARGET_NEW_COUNT}")
         print(
             f"  pages_done={pages_done} range={PAGE_FROM}..{PAGE_TO}  categories={len(CATEGORIES)}"
@@ -808,9 +992,15 @@ def main() -> int:
             f"  seen={seen} under_min={skipped_under_min} skipped_exists={skipped_exists} failed_item={failed_item} failed_page={failed_page}"
         )
         print(f"  skipped_badword={skipped_badword}")
-        if ENABLE_FIRST_POST:
+        if first_post_min_at is not None:
+            print(f"  skipped_first_post_before_min={skipped_first_post_before_min}")
+        if need_first_post_before_save:
             print(f"  first_post filled={first_post_filled} failed={first_post_failed}")
         return 0
+    except KeyboardInterrupt:
+        run_error = "KeyboardInterrupt"
+        print("\n[中断] Ctrl+C を受け取ったため終了します")
+        return 130
     except Exception as e:
         run_error = f"{type(e).__name__}: {e}"
         raise
